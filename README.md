@@ -1,0 +1,505 @@
+# ai-social-publisher
+
+AI destekli, **onaylı** Instagram içerik yayınlama sistemi. Haberleri çeker, AI
+ile skorlar, önemli olanları Telegram üzerinden kullanıcıya bildirir, kullanıcı
+onayıyla dinamik sayıda post alternatifi üretir, seçilen alternatif için görsel
+hazırlar ve Instagram Graph API ile yayınlar.
+
+> **Mimari:** Mikroservis değil. Tek bir Go uygulaması (modüler monolith).
+> İçeride temiz paket yapısı vardır; dışarıda yalnızca **haber-servisi**,
+> **telegram-servisi**, **Instagram Graph API** ve **AI sağlayıcılar** (tgpt /
+> Ollama) bulunur.
+
+---
+
+## İçindekiler
+
+- [Proje amacı](#proje-amacı)
+- [Mimari](#mimari)
+- [Harici servisler](#harici-servisler)
+- [AI provider chain mantığı](#ai-provider-chain-mantığı)
+- [tgpt kurulumu](#tgpt-kurulumu)
+- [Ollama fallback kurulumu](#ollama-fallback-kurulumu)
+- [Kurulum ve lokal çalıştırma](#kurulum-ve-lokal-çalıştırma)
+- [PostgreSQL başlatma](#postgresql-başlatma)
+- [Config örneği](#config-örneği)
+- [Instagram Graph API ayarları](#instagram-graph-api-ayarları)
+- [Telegram callback akışı](#telegram-callback-akışı)
+- [Docker Compose kullanımı](#docker-compose-kullanımı)
+- [HTTP API ve örnek curl komutları](#http-api-ve-örnek-curl-komutları)
+- [Status flow](#status-flow)
+- [Görsel üretimi](#görsel-üretimi)
+- [Klasör yapısı](#klasör-yapısı)
+- [Test](#test)
+
+---
+
+## Proje amacı
+
+4 farklı Instagram kanalı için içerik üretmek:
+
+| Kanal      | Kategori     | Varsayılan alternatif | Bildirim eşiği |
+|------------|--------------|-----------------------|----------------|
+| teknoloji  | `technology` | 5                     | 80             |
+| sinema     | `cinema`     | 3                     | 75             |
+| haber      | `news`       | 3                     | 85             |
+| ekonomi    | `economy`    | 5                     | 80             |
+
+Akış:
+
+1. Belirli aralıklarla `haber-servisi`'nden haber çekilir.
+2. Duplicate kontrolü yapılır (`external_news_id` UNIQUE + job seviyesinde tekillik).
+3. Haber AI ile skorlanır (önem + virallik + risk).
+4. Skor eşik üzerindeyse `telegram-servisi` ile kullanıcıya bildirim gider.
+5. Kullanıcı **"Post Hazırla"** derse config'teki `variant_count` kadar alternatif üretilir.
+6. Üretilen her alternatif için Telegram'a **dinamik** sayıda buton gönderilir.
+7. Kullanıcı bir alternatif seçince görsel hazırlanır, public URL elde edilir.
+8. İçerik Instagram Graph / Content Publishing API ile yayınlanır.
+9. Sonuç DB'ye (`publish_logs`) kaydedilir ve kullanıcıya bildirilir.
+
+---
+
+## Mimari
+
+```
+                ┌────────────────────────── ai-social-publisher (tek uygulama) ──────────────────────────┐
+                │                                                                                          │
+ haber-servisi ─┼─▶ news.Client ─▶ news.Repository ─▶ approval.Service ─┬─▶ ai.Service (tgpt→ollama)       │
+                │                                                       ├─▶ media.Renderer ─▶ storage      │
+ telegram-svc ◀─┼── telegram.Client ◀───────────────────────────────────┤                                  │
+       │        │                                                       └─▶ instagram.Publisher ──────────┼─▶ Instagram Graph API
+       └────────┼─▶ POST /api/telegram/callback ─▶ approval.Service                                        │
+                │                                                                                          │
+                │   scheduler (news-sync · waiting-ai-retry · publish-approved)   PostgreSQL               │
+                └──────────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+Her sorumluluk `internal/` altında ayrı bir pakettir; paketler arası bağımlılık
+tek yönlüdür ve `approval` paketi orkestrasyonu yapar.
+
+---
+
+## Harici servisler
+
+| Servis              | Rolü                                                              |
+|---------------------|-------------------------------------------------------------------|
+| **haber-servisi**   | Haber kaynağı. `GET /api/news?category=...`                       |
+| **telegram-servisi**| Bildirim gönderir (`POST /api/notifications`) ve callback iletir. |
+| **Instagram Graph** | İçeriği bu uygulama yayınlar. Telegram'ın yayınla yetkisi yoktur. |
+| **AI sağlayıcılar** | `tgpt` (CLI) primary, **Ollama** (HTTP) fallback.                 |
+
+---
+
+## AI provider chain mantığı
+
+Sıra **kesinlikle** şöyledir:
+
+1. **Primary:** `tgpt` CLI
+2. **Fallback:** Ollama HTTP API
+3. İkisi de başarısız olursa ilgili job **`WAITING_AI`** durumuna alınır ve
+   scheduler tarafından periyodik olarak tekrar denenir. Sistem **durmaz**.
+
+```go
+// internal/ai/service.go
+aiSvc := ai.NewService(logger,
+    ai.NewTgptProvider(cfg.AI.Providers.Tgpt, logger),   // 1. primary
+    ai.NewOllamaProvider(cfg.AI.Providers.Ollama, logger), // 2. fallback
+)
+```
+
+Her provider `AIProvider` arayüzünü uygular:
+
+```go
+type AIProvider interface {
+    Name() string
+    IsAvailable(ctx context.Context) bool
+    ScoreNews(ctx context.Context, news NewsCandidate) (*NewsScore, error)
+    GeneratePostVariants(ctx context.Context, req GeneratePostVariantsRequest) ([]PostVariant, error)
+    GenerateImagePrompt(ctx context.Context, news NewsCandidate) (string, error)
+}
+```
+
+**Davranış:**
+- tgpt sistemde yoksa (`PATH`'te bulunamazsa) veya config'te `enabled: false` ise
+  `IsAvailable` `false` döner ve atlanır.
+- tgpt timeout / hata / boş çıktı / geçersiz JSON dönerse Ollama denenir.
+- Markdown kod bloğu (` ```json `) gelirse temizlenir (`internal/ai/parse.go`).
+- AI çıktısı her zaman JSON beklenir; skorlar `0-100` aralığına clamp edilir.
+- **Token / hassas veri loglanmaz.**
+
+---
+
+## tgpt kurulumu
+
+`tgpt` bir komut satırı LLM aracıdır. Kurulum:
+
+```bash
+# Önerilen (script):
+curl -sSL https://raw.githubusercontent.com/aandrew-me/tgpt/main/install | bash -s /usr/local/bin
+
+# veya Go ile:
+go install github.com/aandrew-me/tgpt/v2@latest
+```
+
+Doğrulama:
+
+```bash
+tgpt "merhaba"
+```
+
+Config'ten komut değiştirilebilir:
+
+```yaml
+ai:
+  providers:
+    tgpt:
+      enabled: true
+      command: "tgpt"       # PATH'te değilse tam yol verin
+      timeout_seconds: 120
+```
+
+> tgpt kurulu değilse uygulama çökmez; otomatik olarak Ollama'ya düşer.
+
+---
+
+## Ollama fallback kurulumu
+
+```bash
+# Kurulum (Linux/macOS):
+curl -fsSL https://ollama.com/install.sh | sh
+
+# Model indir ve servisi başlat:
+ollama pull llama3.1:8b
+ollama serve   # http://localhost:11434
+```
+
+Sağlık kontrolü `GET /api/tags` ile yapılır; üretim `POST /api/generate`
+(non-streaming, `format: json`) ile.
+
+```yaml
+ai:
+  providers:
+    ollama:
+      enabled: true
+      base_url: "http://localhost:11434"
+      model: "llama3.1:8b"
+      timeout_seconds: 90
+```
+
+---
+
+## Kurulum ve lokal çalıştırma
+
+Gereksinimler: **Go 1.26+**, **PostgreSQL 14+**. (tgpt/Ollama opsiyonel — yoksa
+joblar `WAITING_AI`'da bekler.)
+
+```bash
+# 1) bağımlılıklar
+go mod download
+
+# 2) env ve config hazırla
+cp .env.example .env
+cp config.example.yaml config.yaml   # gerekirse düzenleyin
+
+# 3) ortam değişkenlerini yükle (veya export edin)
+set -a && source .env && set +a
+
+# 4) çalıştır (auto_migrate=true ise migration otomatik uygulanır)
+make run
+# veya
+go run ./cmd/server serve --config config.yaml
+```
+
+Migration'ı elle uygulamak için:
+
+```bash
+go run ./cmd/server migrate up      # tüm migration'ları uygula
+go run ./cmd/server migrate down    # son migration'ı geri al
+```
+
+---
+
+## PostgreSQL başlatma
+
+Sadece veritabanını Docker ile ayağa kaldırmak için:
+
+```bash
+docker run -d --name aisp-postgres \
+  -e POSTGRES_USER=aisp -e POSTGRES_PASSWORD=aisp_secret -e POSTGRES_DB=ai_social_publisher \
+  -p 5432:5432 postgres:16-alpine
+```
+
+DSN örneği (`.env` içindeki `DATABASE_URL`):
+
+```
+postgres://aisp:aisp_secret@localhost:5432/ai_social_publisher?sslmode=disable
+```
+
+Migration'lar `migrations/*.sql` içinde **goose** formatındadır ve uygulamaya
+gömülüdür (`embed.FS`); `database.auto_migrate: true` ile açılışta uygulanır.
+
+---
+
+## Config örneği
+
+Tüm seçenekler için `config.example.yaml`. Önemli bloklar:
+
+```yaml
+post_generation:
+  default_variant_count: 3   # hesapta variant_count yoksa kullanılır
+  max_variant_count: 10      # üstündeki değerler buna düşürülür
+
+accounts:
+  - code: "teknoloji"
+    category: "technology"
+    instagram_user_id: "${IG_TECH_USER_ID}"
+    variant_count: 5         # dinamik alternatif sayısı (sabit değil!)
+    notify_threshold: 80
+    auto_publish: false
+    styles: ["Kısa ve vurucu", "Haber dili", ...]
+```
+
+`${VAR}` placeholder'ları yükleme anında ortam değişkenlerinden genişletilir.
+Hesaplar açılışta `social_accounts` tablosuna upsert edilir (config = doğruluk
+kaynağı).
+
+---
+
+## Instagram Graph API ayarları
+
+```yaml
+instagram:
+  graph_base_url: "https://graph.facebook.com"
+  api_version: "v23.0"
+  access_token: "${INSTAGRAM_ACCESS_TOKEN}"
+  publish_enabled: false     # false → DRY-RUN (gerçek istek atılmaz)
+```
+
+Yayınlama iki adımlıdır:
+
+```
+POST /{ig_user_id}/media           (image_url + caption) → creation_id
+POST /{ig_user_id}/media_publish   (creation_id)         → instagram_media_id
+```
+
+- `publish_enabled: false` iken **dry-run**: gerçek HTTP isteği atılmaz, sentetik
+  `media_id` döner, akışın tamamı (görsel + storage + DB + bildirim) çalışır.
+- `access_token` form gövdesinde gönderilir, **asla loglanmaz**.
+- İlk sürümde yalnızca **single image** desteklenir; reels/story/carousel için
+  yapı genişletilebilir bırakılmıştır.
+
+---
+
+## Telegram callback akışı
+
+**Bildirim (giden)** — `POST {telegram_service}/api/notifications`:
+
+```json
+{
+  "channel": "telegram",
+  "title": "🔥 Önemli haber bulundu",
+  "message": "Başlık: ...\nSkor: 91/100\nKategori: teknoloji",
+  "buttons": [
+    { "text": "Post Hazırla", "action": "GENERATE_POST", "payload": "<postJobId>" },
+    { "text": "Geç",          "action": "SKIP_NEWS",     "payload": "<postJobId>" }
+  ]
+}
+```
+
+**Callback (gelen)** — `POST /api/telegram/callback`:
+
+```json
+{ "action": "GENERATE_POST|SKIP_NEWS|SELECT_VARIANT|REGENERATE_VARIANTS|CANCEL",
+  "payload": "<postJobId | variantId>", "user": "gokhan" }
+```
+
+İki aşamalı onay:
+
+1. **1. aşama** — Önemli haber → `WAITING_FIRST_APPROVAL` → `Post Hazırla` / `Geç`.
+2. **2. aşama** — `Post Hazırla` → `variant_count` kadar alternatif üretilir →
+   `WAITING_VARIANT_APPROVAL` → **dinamik** butonlar:
+
+   ```
+   [1. Alternatif] [2. Alternatif] ... [N. Alternatif] [Yeniden Üret] [İptal]
+   ```
+
+   Buton sayısı `variants.length` kadardır (sabit değildir). `SELECT_VARIANT`
+   payload'ı `variantId` taşır; seçimle job `APPROVED → PUBLISHING → PUBLISHED`
+   yoluna girer.
+
+---
+
+## Docker Compose kullanımı
+
+PostgreSQL + uygulama birlikte:
+
+```bash
+cp .env.example .env        # değerleri düzenleyin
+make docker-up              # docker compose up --build -d
+make docker-down            # durdur
+```
+
+`app` servisi `config.example.yaml` ile başlar ve ortam değişkenlerini
+compose'tan alır. Ollama'ya host üzerinden erişmek için
+`OLLAMA_BASE_URL=http://host.docker.internal:11434` ayarlıdır.
+
+---
+
+## HTTP API ve örnek curl komutları
+
+| Method | Path                          | Açıklama                              |
+|--------|-------------------------------|---------------------------------------|
+| GET    | `/health`                     | Sağlık kontrolü                       |
+| GET    | `/api/accounts`               | Hesapları listele                     |
+| POST   | `/api/accounts`               | Hesap oluştur                         |
+| POST   | `/api/news/sync`              | Haberleri çek + skorla                |
+| GET    | `/api/news/candidates`        | Haber adaylarını listele              |
+| GET    | `/api/posts`                  | Post joblarını listele                |
+| GET    | `/api/posts/{id}`             | Job + alternatiflerini getir          |
+| POST   | `/api/posts/{id}/generate`    | Alternatif üretimini başlat           |
+| POST   | `/api/posts/{id}/approve`     | Alternatif seç (`{"variantId": N}`)   |
+| POST   | `/api/posts/{id}/reject`      | Jobu atla (`SKIPPED`)                 |
+| POST   | `/api/posts/{id}/publish`     | Seçili alternatifi yayınla            |
+| POST   | `/api/telegram/callback`      | Telegram callback giriş noktası       |
+| GET    | `/api/analytics/posts`        | Durum bazlı özet                      |
+| GET    | `/static/*`                   | Üretilen görseller (public URL)       |
+
+```bash
+# Sağlık
+curl -s localhost:8080/health
+
+# Hesaplar
+curl -s localhost:8080/api/accounts | jq
+
+# Haber senkronizasyonu (haber-servisi gerekir)
+curl -s -X POST localhost:8080/api/news/sync
+
+# Bir job için alternatif üret
+curl -s -X POST localhost:8080/api/posts/1/generate
+
+# Alternatif seç → görsel + (dry-run) yayın
+curl -s -X POST localhost:8080/api/posts/1/approve \
+  -H 'Content-Type: application/json' -d '{"variantId": 1}'
+
+# Telegram callback simülasyonu: "Post Hazırla"
+curl -s -X POST localhost:8080/api/telegram/callback \
+  -H 'Content-Type: application/json' \
+  -d '{"action":"GENERATE_POST","payload":"1","user":"gokhan"}'
+
+# Analitik
+curl -s localhost:8080/api/analytics/posts | jq
+```
+
+---
+
+## Status flow
+
+`post_jobs.status` kontrollü bir durum makinesidir
+(`internal/post/status.go`). İzin verilmeyen geçişler `409 Conflict` döner.
+
+```
+NEW
+ ├─▶ WAITING_AI ─▶ SCORED            (AI sağlayıcılar geri geldiğinde retry)
+ └─▶ SCORED
+        ├─▶ SKIPPED                  (eşik altı / accountFit=skip)
+        └─▶ WAITING_FIRST_APPROVAL   (Telegram 1. onay bildirimi)
+               ├─▶ SKIPPED           ("Geç")
+               └─▶ GENERATING_VARIANTS  ("Post Hazırla")
+                      ├─▶ WAITING_AI    (AI yine başarısız → retry)
+                      └─▶ WAITING_VARIANT_APPROVAL  (dinamik butonlar)
+                             ├─▶ SKIPPED              ("İptal")
+                             ├─▶ GENERATING_VARIANTS  ("Yeniden Üret")
+                             └─▶ APPROVED             (alternatif seçildi)
+                                    └─▶ PUBLISHING ─▶ PUBLISHED
+                                                   └─▶ FAILED
+```
+
+Terminal durumlar: `PUBLISHED`, `SKIPPED`, `FAILED`.
+
+---
+
+## Görsel üretimi
+
+İlk sürümde AI image generation yoktur; **template tabanlı** 1080×1080 PNG kart
+üretilir (`internal/media`). Kartta: kanal/kategori etiketi, haber başlığı,
+kaynak, tarih, kısa alt metin ve opsiyonel logo alanı bulunur. Her kategori için
+farklı tema (renk + etiket) tanımlıdır.
+
+Arayüzler ileriye dönük tasarlanmıştır:
+
+```go
+type MediaRenderer interface {
+    RenderPostImage(ctx context.Context, variant post.Variant, news ai.NewsCandidate, account account.Account) (*RenderedMedia, error)
+}
+
+type Storage interface {
+    Upload(ctx context.Context, filePath string) (*UploadedFile, error)
+}
+```
+
+Varsayılan `Storage` implementasyonu **local** sürücüdür: dosyayı `base_dir`
+altına yazar ve `public_base_url` ile birleştirerek public URL üretir. Bu URL
+`GET /static/*` üzerinden servis edilir, böylece Instagram görseli çekebilir.
+
+---
+
+## Ekonomi kanalı için özel kurallar
+
+Ekonomi içeriklerinde prompt ve üretim şu kuralları zorlar (`internal/ai/prompts.go`):
+
+- Yatırım tavsiyesi verilmez; "al/sat/kaçırma/garanti kazanç" yönlendirmesi yapılmaz.
+- Kesin piyasa/fiyat tahmini yapılmaz; kaynakta olmayan veri eklenmez.
+- Panik / manipülatif dil kullanılmaz.
+- Gerekirse caption sonunda: *"Bu içerik yatırım tavsiyesi değildir."*
+
+---
+
+## Klasör yapısı
+
+```
+ai-social-publisher
+├── cmd/server/main.go          # giriş noktası (serve | migrate)
+├── internal/
+│   ├── account/                # social_accounts repo + config sync
+│   ├── ai/                     # provider chain (tgpt, ollama), prompts, parse
+│   ├── approval/               # uçtan uca orkestrasyon
+│   ├── config/                 # YAML + ${ENV} + defaults + validation
+│   ├── database/               # pgx pool + goose migrate
+│   ├── http/                   # chi router + handlers
+│   ├── instagram/              # Graph API publisher (dry-run destekli)
+│   ├── media/                  # template renderer (PNG kart)
+│   ├── news/                   # candidate/score repo + haber-servisi client
+│   ├── post/                   # job/variant/publish_log repo + status FSM
+│   ├── scheduler/              # in-process worker'lar
+│   ├── storage/                # Storage arayüzü + local sürücü
+│   └── telegram/               # bildirim client + callback tipleri
+├── migrations/                 # goose SQL (embed)
+├── templates/                  # kanal şablon kaynakları (ileride)
+├── config.example.yaml
+├── docker-compose.yml · Dockerfile · Makefile · .env.example
+```
+
+---
+
+## Test
+
+```bash
+make test        # go test ./...
+make vet         # go vet ./...
+```
+
+Birim testler: AI JSON ayrıştırma/temizleme (`internal/ai`), durum makinesi
+geçişleri (`internal/post`) ve config defaults/clamp/validation
+(`internal/config`).
+
+---
+
+## Hata yönetimi ilkeleri
+
+- AI provider hataları sistemi durdurmaz → ilgili job `WAITING_AI`.
+- Instagram publish hataları `publish_logs` tablosuna yazılır, job `FAILED` olur.
+- JSON parse hatasında fallback provider denenir.
+- Duplicate haberler tekrar işlenmez (`external_news_id` + job tekilliği).
+- Tüm timeout'lar config'ten gelir.
+- Token/hassas veri loglanmaz; panic yerine kontrollü hata yönetimi + worker'larda
+  panic recovery kullanılır.

@@ -1,0 +1,17 @@
+# Binaries
+/bin/
+/tmp/
+ai-social-publisher
+
+# Local config / secrets
+config.yaml
+.env
+
+# Generated / uploaded media (kept dir via .gitkeep)
+/storage/uploads/*
+!/storage/uploads/.gitkeep
+
+# Go
+*.test
+*.out
+vendor/

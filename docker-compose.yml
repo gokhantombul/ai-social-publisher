@@ -1,0 +1,49 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: aisp-postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-aisp}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-aisp_secret}
+      POSTGRES_DB: ${POSTGRES_DB:-ai_social_publisher}
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-aisp} -d ${POSTGRES_DB:-ai_social_publisher}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: aisp-app
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      # Inside the compose network postgres is reachable by service name.
+      DATABASE_URL: postgres://${POSTGRES_USER:-aisp}:${POSTGRES_PASSWORD:-aisp_secret}@postgres:5432/${POSTGRES_DB:-ai_social_publisher}?sslmode=disable
+      NEWS_SERVICE_BASE_URL: ${NEWS_SERVICE_BASE_URL:-http://localhost:9001}
+      TELEGRAM_SERVICE_BASE_URL: ${TELEGRAM_SERVICE_BASE_URL:-http://localhost:9002}
+      TGPT_COMMAND: ${TGPT_COMMAND:-tgpt}
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-llama3.1:8b}
+      INSTAGRAM_ACCESS_TOKEN: ${INSTAGRAM_ACCESS_TOKEN:-changeme}
+      IG_TECH_USER_ID: ${IG_TECH_USER_ID:-0}
+      IG_CINEMA_USER_ID: ${IG_CINEMA_USER_ID:-0}
+      IG_NEWS_USER_ID: ${IG_NEWS_USER_ID:-0}
+      IG_ECONOMY_USER_ID: ${IG_ECONOMY_USER_ID:-0}
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-http://localhost:8080/static}
+    ports:
+      - "8080:8080"
+    command: ["serve", "--config", "/app/config.example.yaml"]
+    volumes:
+      - uploads:/app/storage/uploads
+
+volumes:
+  pgdata:
+  uploads:

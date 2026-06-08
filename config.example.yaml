@@ -1,0 +1,117 @@
+# ai-social-publisher example configuration.
+# Copy to config.yaml and adjust. ${VAR} placeholders are expanded from the
+# environment at load time (see .env.example).
+
+app:
+  env: "development"
+  http_port: 8080
+  # Public base URL used to build absolute URLs for rendered media.
+  public_base_url: "${PUBLIC_BASE_URL}"
+
+database:
+  url: "${DATABASE_URL}"
+  max_open_conns: 10
+  max_idle_conns: 5
+  conn_max_lifetime_minutes: 30
+  # Run goose migrations automatically on startup.
+  auto_migrate: true
+
+news_service:
+  base_url: "${NEWS_SERVICE_BASE_URL}"
+  timeout_seconds: 20
+  # Categories pulled on each sync run.
+  categories:
+    - "technology"
+    - "cinema"
+    - "news"
+    - "economy"
+
+telegram_service:
+  base_url: "${TELEGRAM_SERVICE_BASE_URL}"
+  timeout_seconds: 15
+
+ai:
+  providers:
+    tgpt:
+      enabled: true
+      command: "${TGPT_COMMAND}"
+      timeout_seconds: 120
+    ollama:
+      enabled: true
+      base_url: "${OLLAMA_BASE_URL}"
+      model: "${OLLAMA_MODEL}"
+      timeout_seconds: 90
+
+post_generation:
+  default_variant_count: 3
+  max_variant_count: 10
+
+instagram:
+  graph_base_url: "https://graph.facebook.com"
+  api_version: "v23.0"
+  access_token: "${INSTAGRAM_ACCESS_TOKEN}"
+  publish_enabled: false
+
+storage:
+  # local: writes rendered images under base_dir and serves them via public_base_url.
+  driver: "local"
+  base_dir: "./storage/uploads"
+
+scheduler:
+  enabled: true
+  news_sync_interval_minutes: 10
+  waiting_ai_retry_interval_minutes: 15
+  publish_interval_minutes: 1
+
+accounts:
+  - code: "teknoloji"
+    name: "Teknoloji Kanalı"
+    category: "technology"
+    instagram_user_id: "${IG_TECH_USER_ID}"
+    variant_count: 5
+    notify_threshold: 80
+    auto_publish: false
+    styles:
+      - "Kısa ve vurucu"
+      - "Haber dili"
+      - "Merak uyandırıcı"
+      - "Teknik detaylı"
+      - "Soru odaklı"
+
+  - code: "sinema"
+    name: "Sinema Kanalı"
+    category: "cinema"
+    instagram_user_id: "${IG_CINEMA_USER_ID}"
+    variant_count: 3
+    notify_threshold: 75
+    auto_publish: false
+    styles:
+      - "Sinema haberi"
+      - "Merak uyandırıcı"
+      - "Sosyal medya dili"
+
+  - code: "haber"
+    name: "Haber Kanalı"
+    category: "news"
+    instagram_user_id: "${IG_NEWS_USER_ID}"
+    variant_count: 3
+    notify_threshold: 85
+    auto_publish: false
+    styles:
+      - "Ciddi haber dili"
+      - "Kısa özet"
+      - "Açıklayıcı"
+
+  - code: "ekonomi"
+    name: "Ekonomi Kanalı"
+    category: "economy"
+    instagram_user_id: "${IG_ECONOMY_USER_ID}"
+    variant_count: 5
+    notify_threshold: 80
+    auto_publish: false
+    styles:
+      - "Kısa ve net ekonomi özeti"
+      - "Piyasa dili"
+      - "Halkın anlayacağı sade dil"
+      - "Veri odaklı açıklama"
+      - "Soru odaklı sosyal medya dili"
