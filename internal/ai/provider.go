@@ -51,5 +51,4 @@ type AIProvider interface {
 	IsAvailable(ctx context.Context) bool
 	ScoreNews(ctx context.Context, news NewsCandidate) (*NewsScore, error)
 	GeneratePostVariants(ctx context.Context, req GeneratePostVariantsRequest) ([]PostVariant, error)
-	GenerateImagePrompt(ctx context.Context, news NewsCandidate) (string, error)
 }

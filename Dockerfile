@@ -13,15 +13,21 @@ COPY . .
 RUN CGO_ENABLED=0 go build -o /app/ai-social-publisher ./cmd/server
 
 # ---- runtime stage ----
-FROM alpine:3.20
+FROM alpine:3.22
 
 WORKDIR /app
-RUN apk add --no-cache ca-certificates
+RUN apk add --no-cache ca-certificates \
+    && addgroup -S app \
+    && adduser -S -G app app \
+    && mkdir -p /app/storage/uploads \
+    && chown -R app:app /app/storage
 
 COPY --from=build /app/ai-social-publisher /app/ai-social-publisher
 COPY migrations /app/migrations
 COPY templates /app/templates
 COPY config.example.yaml /app/config.example.yaml
+
+USER app
 
 EXPOSE 8080
 

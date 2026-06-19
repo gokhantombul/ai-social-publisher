@@ -19,8 +19,25 @@ func writeTemp(t *testing.T, content string) string {
 func TestLoadDefaultsAndClamp(t *testing.T) {
 	t.Setenv("DB_URL", "postgres://localhost/test")
 	yaml := `
+app:
+  public_base_url: "http://localhost:8080/static"
 database:
   url: "${DB_URL}"
+news_service:
+  base_url: "http://localhost:9001"
+  auth_token: "12345678901234567890123456789012"
+  categories: ["technology", "news"]
+telegram_service:
+  base_url: "http://localhost:9002"
+  auth_token: "12345678901234567890123456789012"
+ai:
+  providers:
+    tgpt:
+      enabled: true
+security:
+  api_token: "12345678901234567890123456789012"
+  telegram_callback_secret: "12345678901234567890123456789012"
+  allowed_telegram_users: ["tester"]
 post_generation:
   default_variant_count: 3
   max_variant_count: 4
@@ -54,6 +71,23 @@ accounts:
 
 func TestValidateRequiresDatabaseURL(t *testing.T) {
 	yaml := `
+app:
+  public_base_url: "http://localhost:8080/static"
+news_service:
+  base_url: "http://localhost:9001"
+  auth_token: "12345678901234567890123456789012"
+  categories: ["technology"]
+telegram_service:
+  base_url: "http://localhost:9002"
+  auth_token: "12345678901234567890123456789012"
+ai:
+  providers:
+    tgpt:
+      enabled: true
+security:
+  api_token: "12345678901234567890123456789012"
+  telegram_callback_secret: "12345678901234567890123456789012"
+  allowed_telegram_users: ["tester"]
 accounts:
   - code: "tech"
     category: "technology"
@@ -65,8 +99,25 @@ accounts:
 
 func TestValidateRejectsDuplicateCodes(t *testing.T) {
 	yaml := `
+app:
+  public_base_url: "http://localhost:8080/static"
 database:
   url: "postgres://localhost/test"
+news_service:
+  base_url: "http://localhost:9001"
+  auth_token: "12345678901234567890123456789012"
+  categories: ["technology", "news"]
+telegram_service:
+  base_url: "http://localhost:9002"
+  auth_token: "12345678901234567890123456789012"
+ai:
+  providers:
+    tgpt:
+      enabled: true
+security:
+  api_token: "12345678901234567890123456789012"
+  telegram_callback_secret: "12345678901234567890123456789012"
+  allowed_telegram_users: ["tester"]
 accounts:
   - code: "dup"
     category: "technology"
@@ -75,5 +126,20 @@ accounts:
 `
 	if _, err := Load(writeTemp(t, yaml)); err == nil {
 		t.Error("expected error for duplicate account codes")
+	}
+}
+
+func TestLoadRejectsUnknownFieldsAndMissingEnv(t *testing.T) {
+	path := writeTemp(t, `database:
+  url: "${MISSING_DATABASE_URL}"
+unknown_section: true
+`)
+	if _, err := Load(path); err == nil {
+		t.Fatal("expected missing environment variable error")
+	}
+
+	t.Setenv("MISSING_DATABASE_URL", "postgres://localhost/test")
+	if _, err := Load(path); err == nil {
+		t.Fatal("expected unknown YAML field error")
 	}
 }

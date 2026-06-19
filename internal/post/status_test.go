@@ -7,10 +7,13 @@ func TestCanTransition(t *testing.T) {
 		from, to Status
 		want     bool
 	}{
-		{StatusNew, StatusScored, true},
-		{StatusNew, StatusWaitingAI, true},
+		{StatusNew, StatusScoringQueued, true},
+		{StatusScoringQueued, StatusScoring, true},
+		{StatusScoring, StatusScored, true},
+		{StatusScoring, StatusWaitingAI, true},
 		{StatusScored, StatusWaitingFirstApproval, true},
-		{StatusWaitingFirstApproval, StatusGeneratingVariants, true},
+		{StatusWaitingFirstApproval, StatusVariantsQueued, true},
+		{StatusVariantsQueued, StatusGeneratingVariants, true},
 		{StatusGeneratingVariants, StatusWaitingVariantApproval, true},
 		{StatusWaitingVariantApproval, StatusApproved, true},
 		{StatusApproved, StatusPublishing, true},
@@ -20,8 +23,9 @@ func TestCanTransition(t *testing.T) {
 		{StatusScored, StatusApproved, false},
 		{StatusPublished, StatusPublishing, false},
 		{StatusSkipped, StatusApproved, false},
-		// No-op is allowed (idempotent retries).
-		{StatusWaitingAI, StatusWaitingAI, true},
+		// No-op transitions are rejected so they cannot repeat side effects.
+		{StatusWaitingAI, StatusWaitingAI, false},
+		{StatusPublishing, StatusPublishing, false},
 	}
 	for _, c := range cases {
 		if got := CanTransition(c.from, c.to); got != c.want {

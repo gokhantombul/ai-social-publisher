@@ -1,4 +1,4 @@
-.PHONY: help build run test tidy fmt vet lint docker-up docker-down migrate-up migrate-down
+.PHONY: help build run test test-race fmt fmt-check tidy vet vuln lint ci docker-up docker-down migrate-up migrate-down
 
 BINARY := bin/ai-social-publisher
 PKG := ./...
@@ -15,14 +15,27 @@ run: ## Run the server (uses config.yaml + .env)
 test: ## Run unit tests
 	go test $(PKG) -count=1
 
+test-race: ## Run tests with race detector
+	go test -race $(PKG) -count=1
+
 tidy: ## go mod tidy
 	go mod tidy
 
 fmt: ## Format code
 	go fmt $(PKG)
 
+fmt-check: ## Check formatting without modifying files
+	@test -z "$$(gofmt -l .)"
+
 vet: ## Run go vet
 	go vet $(PKG)
+
+vuln: ## Scan reachable code for known vulnerabilities
+	govulncheck $(PKG)
+
+lint: fmt-check vet ## Run static checks
+
+ci: lint test-race build ## Run the local CI subset
 
 docker-up: ## Start docker compose stack (postgres + app)
 	docker compose up --build -d

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -70,14 +71,6 @@ func (p *OllamaProvider) GeneratePostVariants(ctx context.Context, req GenerateP
 	return parseVariants(out)
 }
 
-func (p *OllamaProvider) GenerateImagePrompt(ctx context.Context, news NewsCandidate) (string, error) {
-	out, err := p.generate(ctx, buildImagePrompt(news), false)
-	if err != nil {
-		return "", err
-	}
-	return strings.TrimSpace(out), nil
-}
-
 type ollamaGenerateRequest struct {
 	Model  string `json:"model"`
 	Prompt string `json:"prompt"`
@@ -130,7 +123,7 @@ func (p *OllamaProvider) generate(ctx context.Context, prompt string, jsonMode b
 	}
 
 	var out ollamaGenerateResponse
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 10<<20)).Decode(&out); err != nil {
 		return "", fmt.Errorf("decode ollama response: %w", err)
 	}
 

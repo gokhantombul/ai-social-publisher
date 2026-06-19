@@ -61,10 +61,12 @@ func (p *Publisher) PublishImage(ctx context.Context, req PublishRequest) (*Publ
 
 	if !p.cfg.PublishEnabled {
 		p.logger.Info("dry-run: skipping real Instagram publish", "ig_user_id", req.InstagramUserID, "image_url", req.ImageURL)
-		respDump, _ := json.Marshal(map[string]any{"dry_run": true})
+		mediaID := "dryrun_media_" + fmt.Sprint(time.Now().UnixNano())
+		creationID := "dryrun_creation_" + fmt.Sprint(time.Now().UnixNano())
+		respDump, _ := json.Marshal(map[string]any{"dry_run": true, "media_id": mediaID, "creation_id": creationID})
 		return &PublishResult{
-			MediaID:      "dryrun_media_" + fmt.Sprint(time.Now().Unix()),
-			CreationID:   "dryrun_creation_" + fmt.Sprint(time.Now().Unix()),
+			MediaID:      mediaID,
+			CreationID:   creationID,
 			DryRun:       true,
 			RequestDump:  reqDump,
 			ResponseDump: respDump,
@@ -175,13 +177,20 @@ func (p *Publisher) postForm(ctx context.Context, endpoint string, form url.Valu
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
 		return nil, err
 	}
 	// Note: access_token is in the form body, never logged here.
 	if resp.StatusCode >= 400 {
-		return body, fmt.Errorf("graph API status %d", resp.StatusCode)
+		return body, fmt.Errorf("graph API status %d: %s", resp.StatusCode, truncateBody(body, 500))
 	}
 	return body, nil
+}
+
+func truncateBody(body []byte, limit int) string {
+	if len(body) > limit {
+		body = body[:limit]
+	}
+	return strings.TrimSpace(string(body))
 }

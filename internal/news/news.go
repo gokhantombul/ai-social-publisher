@@ -133,11 +133,40 @@ func (r *Repository) SaveScore(ctx context.Context, s Score) (*Score, error) {
 	const q = `
 INSERT INTO news_scores (news_candidate_id, importance_score, virality_score, account_fit, should_notify, risk_level, reason, ai_provider, ai_model)
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+ON CONFLICT (news_candidate_id) DO UPDATE SET
+    importance_score = EXCLUDED.importance_score,
+    virality_score = EXCLUDED.virality_score,
+    account_fit = EXCLUDED.account_fit,
+    should_notify = EXCLUDED.should_notify,
+    risk_level = EXCLUDED.risk_level,
+    reason = EXCLUDED.reason,
+    ai_provider = EXCLUDED.ai_provider,
+    ai_model = EXCLUDED.ai_model,
+    created_at = now()
 RETURNING id, created_at`
 	err := r.db.QueryRowContext(ctx, q,
 		s.NewsCandidateID, s.ImportanceScore, s.ViralityScore, s.AccountFit,
 		s.ShouldNotify, s.RiskLevel, s.Reason, s.AIProvider, s.AIModel,
 	).Scan(&s.ID, &s.CreatedAt)
+	if err != nil {
+		return nil, err
+	}
+	return &s, nil
+}
+
+func (r *Repository) GetLatestScore(ctx context.Context, candidateID int64) (*Score, error) {
+	const q = `SELECT id, news_candidate_id, importance_score, virality_score, account_fit,
+       should_notify, risk_level, reason, ai_provider, ai_model, created_at
+FROM news_scores WHERE news_candidate_id = $1 ORDER BY id DESC LIMIT 1`
+	var s Score
+	err := r.db.QueryRowContext(ctx, q, candidateID).Scan(
+		&s.ID, &s.NewsCandidateID, &s.ImportanceScore, &s.ViralityScore,
+		&s.AccountFit, &s.ShouldNotify, &s.RiskLevel, &s.Reason,
+		&s.AIProvider, &s.AIModel, &s.CreatedAt,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
 	if err != nil {
 		return nil, err
 	}

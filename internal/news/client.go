@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"time"
@@ -29,6 +30,7 @@ type listResponse struct {
 // Client talks to the external haber-servisi.
 type Client struct {
 	baseURL    string
+	authToken  string
 	httpClient *http.Client
 }
 
@@ -36,6 +38,7 @@ type Client struct {
 func NewClient(cfg config.NewsServiceConfig) *Client {
 	return &Client{
 		baseURL:    cfg.BaseURL,
+		authToken:  cfg.AuthToken,
 		httpClient: &http.Client{Timeout: cfg.Timeout()},
 	}
 }
@@ -54,6 +57,7 @@ func (c *Client) FetchByCategory(ctx context.Context, category string) ([]Item, 
 	if err != nil {
 		return nil, fmt.Errorf("build news request: %w", err)
 	}
+	req.Header.Set("Authorization", "Bearer "+c.authToken)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -62,11 +66,15 @@ func (c *Client) FetchByCategory(ctx context.Context, category string) ([]Item, 
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("news service returned status %d for category %s", resp.StatusCode, category)
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+		if len(body) > 500 {
+			body = body[:500]
+		}
+		return nil, fmt.Errorf("news service returned status %d for category %s: %s", resp.StatusCode, category, string(body))
 	}
 
 	var out listResponse
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 5<<20)).Decode(&out); err != nil {
 		return nil, fmt.Errorf("decode news response: %w", err)
 	}
 	return out.Items, nil

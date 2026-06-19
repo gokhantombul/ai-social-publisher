@@ -3,6 +3,7 @@ package http
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -12,6 +13,7 @@ import (
 	"ai-social-publisher/internal/approval"
 	"ai-social-publisher/internal/config"
 	"ai-social-publisher/internal/news"
+	"ai-social-publisher/internal/outbox"
 	"ai-social-publisher/internal/post"
 
 	"github.com/go-chi/chi/v5"
@@ -26,6 +28,10 @@ type Handler struct {
 	posts    *post.Repository
 	approval *approval.Service
 	logger   *slog.Logger
+	db       *sql.DB
+	outbox   *outbox.Repository
+	apiLimit *ipRateLimiter
+	cbLimit  *ipRateLimiter
 }
 
 // Deps bundles handler dependencies.
@@ -36,6 +42,8 @@ type Deps struct {
 	Posts    *post.Repository
 	Approval *approval.Service
 	Logger   *slog.Logger
+	DB       *sql.DB
+	Outbox   *outbox.Repository
 	// StaticDir is served at /static so rendered media has a public URL.
 	StaticDir string
 }
@@ -49,6 +57,10 @@ func NewServer(d Deps) *http.Server {
 		posts:    d.Posts,
 		approval: d.Approval,
 		logger:   d.Logger.With("component", "http"),
+		db:       d.DB,
+		outbox:   d.Outbox,
+		apiLimit: newIPRateLimiter(120, time.Minute),
+		cbLimit:  newIPRateLimiter(60, time.Minute),
 	}
 
 	r := chi.NewRouter()
@@ -57,25 +69,33 @@ func NewServer(d Deps) *http.Server {
 	r.Use(requestLogger(h.logger))
 	r.Use(middleware.Timeout(60 * time.Second))
 
+	r.Get("/live", h.live)
 	r.Get("/health", h.health)
+	r.Get("/ready", h.health)
 
 	r.Route("/api", func(r chi.Router) {
-		r.Get("/accounts", h.listAccounts)
-		r.Post("/accounts", h.createAccount)
+		// telegram-service authenticates callbacks with a body HMAC rather than
+		// the administrative bearer token.
+		r.With(h.cbLimit.middleware, h.telegramCallbackAuth).Post("/telegram/callback", h.telegramCallback)
 
-		r.Post("/news/sync", h.syncNews)
-		r.Get("/news/candidates", h.listCandidates)
+		r.Group(func(r chi.Router) {
+			r.Use(h.apiLimit.middleware)
+			r.Use(h.apiAuth)
+			r.Use(maxBodyBytes(1 << 20))
+			r.Get("/accounts", h.listAccounts)
 
-		r.Get("/posts", h.listPosts)
-		r.Get("/posts/{id}", h.getPost)
-		r.Post("/posts/{id}/generate", h.generatePost)
-		r.Post("/posts/{id}/approve", h.approvePost)
-		r.Post("/posts/{id}/reject", h.rejectPost)
-		r.Post("/posts/{id}/publish", h.publishPost)
+			r.Post("/news/sync", h.syncNews)
+			r.Get("/news/candidates", h.listCandidates)
 
-		r.Post("/telegram/callback", h.telegramCallback)
+			r.Get("/posts", h.listPosts)
+			r.Get("/posts/{id}", h.getPost)
+			r.Post("/posts/{id}/generate", h.generatePost)
+			r.Post("/posts/{id}/approve", h.approvePost)
+			r.Post("/posts/{id}/reject", h.rejectPost)
+			r.Post("/posts/{id}/publish", h.publishPost)
 
-		r.Get("/analytics/posts", h.analyticsPosts)
+			r.Get("/analytics/posts", h.analyticsPosts)
+		})
 	})
 
 	// Serve rendered media so Instagram (and humans) can fetch the public URL.
@@ -88,6 +108,10 @@ func NewServer(d Deps) *http.Server {
 		Addr:              fmt.Sprintf(":%d", d.Config.App.HTTPPort),
 		Handler:           r,
 		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      65 * time.Second,
+		IdleTimeout:       60 * time.Second,
+		MaxHeaderBytes:    1 << 20,
 	}
 }
 
@@ -99,6 +123,7 @@ func requestLogger(logger *slog.Logger) func(http.Handler) http.Handler {
 			ww := middleware.NewWrapResponseWriter(w, r.ProtoMajor)
 			next.ServeHTTP(ww, r)
 			logger.Info("request",
+				"request_id", middleware.GetReqID(r.Context()),
 				"method", r.Method,
 				"path", r.URL.Path,
 				"status", ww.Status(),

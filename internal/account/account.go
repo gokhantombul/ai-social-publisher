@@ -23,7 +23,6 @@ type Account struct {
 	InstagramUserID string    `json:"instagramUserId"`
 	VariantCount    int       `json:"variantCount"`
 	NotifyThreshold int       `json:"notifyThreshold"`
-	AutoPublish     bool      `json:"autoPublish"`
 	IsActive        bool      `json:"isActive"`
 	CreatedAt       time.Time `json:"createdAt"`
 	UpdatedAt       time.Time `json:"updatedAt"`
@@ -41,32 +40,42 @@ func NewRepository(db *sql.DB) *Repository {
 // SyncFromConfig upserts the configured accounts into the database by code. It
 // is called on startup so config remains the source of truth for channels.
 func (r *Repository) SyncFromConfig(ctx context.Context, accounts []config.AccountConfig) error {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	// Config is the source of truth: deactivate everything first, then reactivate
+	// exactly the configured set in the same transaction.
+	if _, err := tx.ExecContext(ctx, `UPDATE social_accounts SET is_active = FALSE, updated_at = now() WHERE is_active = TRUE`); err != nil {
+		return fmt.Errorf("deactivate accounts: %w", err)
+	}
 	const q = `
-INSERT INTO social_accounts (code, name, category, instagram_user_id, variant_count, notify_threshold, auto_publish, is_active, updated_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, TRUE, now())
+INSERT INTO social_accounts (code, name, category, instagram_user_id, variant_count, notify_threshold, is_active, updated_at)
+VALUES ($1, $2, $3, $4, $5, $6, TRUE, now())
 ON CONFLICT (code) DO UPDATE SET
     name = EXCLUDED.name,
     category = EXCLUDED.category,
     instagram_user_id = EXCLUDED.instagram_user_id,
     variant_count = EXCLUDED.variant_count,
     notify_threshold = EXCLUDED.notify_threshold,
-    auto_publish = EXCLUDED.auto_publish,
     is_active = TRUE,
     updated_at = now();`
 
 	for _, a := range accounts {
-		if _, err := r.db.ExecContext(ctx, q,
+		if _, err := tx.ExecContext(ctx, q,
 			a.Code, a.Name, a.Category, a.InstagramUserID,
-			a.VariantCount, a.NotifyThreshold, a.AutoPublish,
+			a.VariantCount, a.NotifyThreshold,
 		); err != nil {
 			return fmt.Errorf("upsert account %q: %w", a.Code, err)
 		}
 	}
-	return nil
+	return tx.Commit()
 }
 
 func (r *Repository) List(ctx context.Context) ([]Account, error) {
-	const q = `SELECT id, code, name, category, instagram_user_id, variant_count, notify_threshold, auto_publish, is_active, created_at, updated_at
+	const q = `SELECT id, code, name, category, instagram_user_id, variant_count, notify_threshold, is_active, created_at, updated_at
 FROM social_accounts ORDER BY id`
 	rows, err := r.db.QueryContext(ctx, q)
 	if err != nil {
@@ -98,7 +107,7 @@ func (r *Repository) GetByCode(ctx context.Context, code string) (*Account, erro
 }
 
 func (r *Repository) getBy(ctx context.Context, column string, value any) (*Account, error) {
-	q := fmt.Sprintf(`SELECT id, code, name, category, instagram_user_id, variant_count, notify_threshold, auto_publish, is_active, created_at, updated_at
+	q := fmt.Sprintf(`SELECT id, code, name, category, instagram_user_id, variant_count, notify_threshold, is_active, created_at, updated_at
 FROM social_accounts WHERE %s = $1 AND is_active = TRUE LIMIT 1`, column)
 	a, err := scan(r.db.QueryRowContext(ctx, q, value))
 	if errors.Is(err, sql.ErrNoRows) {
@@ -110,20 +119,6 @@ FROM social_accounts WHERE %s = $1 AND is_active = TRUE LIMIT 1`, column)
 	return &a, nil
 }
 
-// Create inserts a new account (used by the POST /api/accounts endpoint).
-func (r *Repository) Create(ctx context.Context, a Account) (*Account, error) {
-	const q = `
-INSERT INTO social_accounts (code, name, category, instagram_user_id, variant_count, notify_threshold, auto_publish, is_active)
-VALUES ($1, $2, $3, $4, $5, $6, $7, TRUE)
-RETURNING id, code, name, category, instagram_user_id, variant_count, notify_threshold, auto_publish, is_active, created_at, updated_at`
-	created, err := scan(r.db.QueryRowContext(ctx, q,
-		a.Code, a.Name, a.Category, a.InstagramUserID, a.VariantCount, a.NotifyThreshold, a.AutoPublish))
-	if err != nil {
-		return nil, err
-	}
-	return &created, nil
-}
-
 // scanner is satisfied by *sql.Row and *sql.Rows.
 type scanner interface {
 	Scan(dest ...any) error
@@ -133,7 +128,7 @@ func scan(s scanner) (Account, error) {
 	var a Account
 	err := s.Scan(
 		&a.ID, &a.Code, &a.Name, &a.Category, &a.InstagramUserID,
-		&a.VariantCount, &a.NotifyThreshold, &a.AutoPublish, &a.IsActive,
+		&a.VariantCount, &a.NotifyThreshold, &a.IsActive,
 		&a.CreatedAt, &a.UpdatedAt,
 	)
 	return a, err

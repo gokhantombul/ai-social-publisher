@@ -35,6 +35,12 @@ func Connect(ctx context.Context, cfg config.DatabaseConfig) (*sql.DB, error) {
 
 // Migrate applies all pending goose migrations from the embedded migrations FS.
 func Migrate(db *sql.DB, logger *slog.Logger) error {
+	unlock, err := migrationLock(db)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+
 	goose.SetBaseFS(migrations.FS)
 	goose.SetLogger(gooseLogger{logger})
 
@@ -49,12 +55,38 @@ func Migrate(db *sql.DB, logger *slog.Logger) error {
 
 // MigrateDown rolls back a single migration. Used by the `migrate down` command.
 func MigrateDown(db *sql.DB, logger *slog.Logger) error {
+	unlock, err := migrationLock(db)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+
 	goose.SetBaseFS(migrations.FS)
 	goose.SetLogger(gooseLogger{logger})
 	if err := goose.SetDialect("postgres"); err != nil {
 		return fmt.Errorf("set goose dialect: %w", err)
 	}
 	return goose.Down(db, ".")
+}
+
+// migrationLock serializes migrations across concurrently starting application
+// instances. The advisory lock is held by a dedicated connection while Goose
+// uses the pool to execute migration statements.
+func migrationLock(db *sql.DB) (func(), error) {
+	ctx := context.Background()
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("acquire migration connection: %w", err)
+	}
+	const lockID int64 = 0x41495350 // "AISP"
+	if _, err := conn.ExecContext(ctx, `SELECT pg_advisory_lock($1)`, lockID); err != nil {
+		_ = conn.Close()
+		return nil, fmt.Errorf("acquire migration lock: %w", err)
+	}
+	return func() {
+		_, _ = conn.ExecContext(context.Background(), `SELECT pg_advisory_unlock($1)`, lockID)
+		_ = conn.Close()
+	}, nil
 }
 
 // gooseLogger adapts slog to goose's logger interface.

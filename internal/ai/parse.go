@@ -49,8 +49,17 @@ func parseScore(raw string) (*NewsScore, error) {
 	if score.AccountFit == "" {
 		score.AccountFit = "skip"
 	}
+	if !oneOf(score.AccountFit, "technology", "cinema", "news", "economy", "skip") {
+		return nil, fmt.Errorf("invalid accountFit %q", score.AccountFit)
+	}
 	if score.RiskLevel == "" {
 		score.RiskLevel = "low"
+	}
+	if !oneOf(score.RiskLevel, "low", "medium", "high") {
+		return nil, fmt.Errorf("invalid riskLevel %q", score.RiskLevel)
+	}
+	if len([]rune(score.Reason)) > 1000 {
+		score.Reason = string([]rune(score.Reason)[:1000])
 	}
 	return &score, nil
 }
@@ -82,16 +91,26 @@ func parseVariants(raw string) ([]PostVariant, error) {
 
 func normalizeVariants(in []PostVariant) []PostVariant {
 	out := make([]PostVariant, 0, len(in))
-	for i, v := range in {
+	for _, v := range in {
 		if strings.TrimSpace(v.Caption) == "" {
 			continue
 		}
-		if v.VariantNo == 0 {
-			v.VariantNo = i + 1
+		if len([]rune(v.Caption)) > 2200 {
+			continue
 		}
+		v.VariantNo = len(out) + 1
 		out = append(out, v)
 	}
 	return out
+}
+
+func oneOf(value string, allowed ...string) bool {
+	for _, candidate := range allowed {
+		if value == candidate {
+			return true
+		}
+	}
+	return false
 }
 
 func clamp(v, lo, hi int) int {

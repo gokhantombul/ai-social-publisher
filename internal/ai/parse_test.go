@@ -69,3 +69,9 @@ func TestParseVariantsEmpty(t *testing.T) {
 		t.Error("expected error for empty variants")
 	}
 }
+
+func TestParseScoreRejectsUnknownEnums(t *testing.T) {
+	if _, err := parseScore(`{"importanceScore":80,"viralityScore":70,"accountFit":"other","shouldNotify":true,"riskLevel":"extreme"}`); err == nil {
+		t.Fatal("expected invalid enum error")
+	}
+}

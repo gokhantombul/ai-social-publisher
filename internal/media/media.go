@@ -19,7 +19,9 @@ import (
 	"ai-social-publisher/internal/post"
 
 	"golang.org/x/image/font"
-	"golang.org/x/image/font/basicfont"
+	"golang.org/x/image/font/gofont/gobold"
+	"golang.org/x/image/font/gofont/goregular"
+	"golang.org/x/image/font/opentype"
 	"golang.org/x/image/math/fixed"
 )
 
@@ -55,6 +57,10 @@ const (
 // TemplateRenderer draws cards as PNG files into outputDir.
 type TemplateRenderer struct {
 	outputDir string
+	labelFace font.Face
+	titleFace font.Face
+	bodyFace  font.Face
+	metaFace  font.Face
 }
 
 // NewTemplateRenderer ensures the output directory exists.
@@ -62,11 +68,41 @@ func NewTemplateRenderer(outputDir string) (*TemplateRenderer, error) {
 	if err := os.MkdirAll(outputDir, 0o755); err != nil {
 		return nil, fmt.Errorf("create media output dir: %w", err)
 	}
-	return &TemplateRenderer{outputDir: outputDir}, nil
+	regular, err := opentype.Parse(goregular.TTF)
+	if err != nil {
+		return nil, fmt.Errorf("parse regular font: %w", err)
+	}
+	bold, err := opentype.Parse(gobold.TTF)
+	if err != nil {
+		return nil, fmt.Errorf("parse bold font: %w", err)
+	}
+	newFace := func(parsed *opentype.Font, size float64) (font.Face, error) {
+		return opentype.NewFace(parsed, &opentype.FaceOptions{Size: size, DPI: 72, Hinting: font.HintingFull})
+	}
+	labelFace, err := newFace(bold, 42)
+	if err != nil {
+		return nil, err
+	}
+	titleFace, err := newFace(bold, 52)
+	if err != nil {
+		return nil, err
+	}
+	bodyFace, err := newFace(regular, 32)
+	if err != nil {
+		return nil, err
+	}
+	metaFace, err := newFace(regular, 25)
+	if err != nil {
+		return nil, err
+	}
+	return &TemplateRenderer{outputDir: outputDir, labelFace: labelFace, titleFace: titleFace, bodyFace: bodyFace, metaFace: metaFace}, nil
 }
 
 // RenderPostImage produces a 1080x1080 PNG card and returns its local path.
 func (r *TemplateRenderer) RenderPostImage(ctx context.Context, variant post.Variant, news ai.NewsCandidate, acct account.Account) (*RenderedMedia, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	th, ok := themes[acct.Category]
 	if !ok {
 		th = theme{bg: color.RGBA{0x20, 0x20, 0x20, 0xFF}, label: strings.ToUpper(acct.Category)}
@@ -84,13 +120,13 @@ func (r *TemplateRenderer) RenderPostImage(ctx context.Context, variant post.Var
 
 	y := 140
 	// Category label.
-	drawText(img, sanitize(th.label), margin, y, accent, 3)
+	drawText(img, th.label, margin, y, accent, r.labelFace)
 	y += 90
 
 	// Headline (wrapped).
-	for _, line := range wrap(sanitize(news.Title), 34) {
-		drawText(img, line, margin, y, white, 3)
-		y += 56
+	for _, line := range wrap(news.Title, 34) {
+		drawText(img, line, margin, y, white, r.titleFace)
+		y += 64
 		if y > canvasSize-360 {
 			break
 		}
@@ -98,23 +134,23 @@ func (r *TemplateRenderer) RenderPostImage(ctx context.Context, variant post.Var
 
 	y += 30
 	// Short punchy sub-text from the caption's first line.
-	sub := firstLine(sanitize(variant.Caption))
+	sub := firstLine(variant.Caption)
 	for _, line := range wrap(sub, 46) {
-		drawText(img, line, margin, y, muted, 2)
-		y += 40
+		drawText(img, line, margin, y, muted, r.bodyFace)
+		y += 43
 		if y > canvasSize-200 {
 			break
 		}
 	}
 
 	// Footer: source + date.
-	footer := sanitize(news.Source)
+	footer := news.Source
 	date := news.PublishedAt
 	if date.IsZero() {
 		date = time.Now()
 	}
 	footer = strings.TrimSpace(footer + "  -  " + date.Format("02.01.2006"))
-	drawText(img, footer, margin, canvasSize-margin, muted, 2)
+	drawText(img, footer, margin, canvasSize-margin, muted, r.metaFace)
 
 	// Optional logo area placeholder (top-right box).
 	logoBox := image.Rect(canvasSize-margin-120, 60, canvasSize-margin, 180)
@@ -130,43 +166,21 @@ func (r *TemplateRenderer) RenderPostImage(ctx context.Context, variant post.Var
 	defer f.Close()
 
 	if err := png.Encode(f, img); err != nil {
+		_ = os.Remove(outPath)
 		return nil, fmt.Errorf("encode png: %w", err)
 	}
 
 	return &RenderedMedia{LocalPath: outPath, MimeType: "image/png"}, nil
 }
 
-// drawText draws s at integer scale using the fixed 7x13 basic font. Scaling is
-// done by replicating pixels so headlines are legible on a 1080px canvas.
-func drawText(dst *image.RGBA, s string, x, y int, col color.Color, scale int) {
-	if scale < 1 {
-		scale = 1
-	}
-	// Render into a small mask, then scale up into dst.
-	face := basicfont.Face7x13
-	tmp := image.NewRGBA(image.Rect(0, 0, len(s)*7+8, 16))
+func drawText(dst *image.RGBA, s string, x, y int, col color.Color, face font.Face) {
 	d := &font.Drawer{
-		Dst:  tmp,
+		Dst:  dst,
 		Src:  image.NewUniform(col),
 		Face: face,
-		Dot:  fixed.P(0, 12),
+		Dot:  fixed.P(x, y),
 	}
 	d.DrawString(s)
-
-	b := tmp.Bounds()
-	for py := b.Min.Y; py < b.Max.Y; py++ {
-		for px := b.Min.X; px < b.Max.X; px++ {
-			_, _, _, a := tmp.At(px, py).RGBA()
-			if a == 0 {
-				continue
-			}
-			for sy := 0; sy < scale; sy++ {
-				for sx := 0; sx < scale; sx++ {
-					dst.Set(x+px*scale+sx, y-12*scale+py*scale+sy, col)
-				}
-			}
-		}
-	}
 }
 
 // wrap splits s into lines of at most width runes, breaking on spaces.
@@ -193,15 +207,4 @@ func firstLine(s string) string {
 		return s[:i]
 	}
 	return s
-}
-
-// sanitize maps Turkish-specific glyphs the basic font lacks to ASCII so text
-// stays readable. (The basic font only covers Latin-1.)
-var turkishReplacer = strings.NewReplacer(
-	"İ", "I", "ı", "i", "Ş", "S", "ş", "s", "Ğ", "G", "ğ", "g",
-	"Ç", "C", "ç", "c", "Ö", "O", "ö", "o", "Ü", "U", "ü", "u",
-)
-
-func sanitize(s string) string {
-	return turkishReplacer.Replace(s)
 }

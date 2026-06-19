@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 
 	"ai-social-publisher/internal/config"
@@ -31,10 +32,11 @@ type Button struct {
 
 // Notification is the payload sent to POST /api/notifications.
 type Notification struct {
-	Channel string   `json:"channel"`
-	Title   string   `json:"title"`
-	Message string   `json:"message"`
-	Buttons []Button `json:"buttons,omitempty"`
+	Channel        string   `json:"channel"`
+	IdempotencyKey string   `json:"idempotencyKey"`
+	Title          string   `json:"title"`
+	Message        string   `json:"message"`
+	Buttons        []Button `json:"buttons,omitempty"`
 }
 
 // Callback is the inbound payload from the telegram-servisi when a user taps a
@@ -48,12 +50,14 @@ type Callback struct {
 // Client sends notifications to the telegram-servisi.
 type Client struct {
 	baseURL    string
+	authToken  string
 	httpClient *http.Client
 }
 
 func NewClient(cfg config.TelegramServiceConfig) *Client {
 	return &Client{
 		baseURL:    cfg.BaseURL,
+		authToken:  cfg.AuthToken,
 		httpClient: &http.Client{Timeout: cfg.Timeout()},
 	}
 }
@@ -74,15 +78,24 @@ func (c *Client) Send(ctx context.Context, n Notification) error {
 		return fmt.Errorf("build notification request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+c.authToken)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("send notification: %w", err)
 	}
 	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
 
 	if resp.StatusCode >= 300 {
-		return fmt.Errorf("telegram service returned status %d", resp.StatusCode)
+		return fmt.Errorf("telegram service returned status %d: %s", resp.StatusCode, truncateResponse(body, 500))
 	}
 	return nil
+}
+
+func truncateResponse(body []byte, limit int) string {
+	if len(body) > limit {
+		body = body[:limit]
+	}
+	return string(body)
 }

@@ -70,25 +70,13 @@ func (s *Service) GeneratePostVariants(ctx context.Context, req GeneratePostVari
 			s.logger.Warn("provider returned zero variants, trying next", "provider", p.Name())
 			continue
 		}
+		if len(variants) != req.VariantCount {
+			s.logger.Warn("provider returned wrong variant count", "provider", p.Name(), "got", len(variants), "want", req.VariantCount)
+			continue
+		}
 		return &VariantsResult{Variants: variants, Provider: p.Name(), Model: modelOf(p)}, nil
 	}
 	return nil, ErrAllProvidersFailed
-}
-
-// GenerateImagePrompt tries each available provider; falls back to a generated
-// prompt from the headline if all providers fail (image prompt is non-critical).
-func (s *Service) GenerateImagePrompt(ctx context.Context, news NewsCandidate) (string, error) {
-	for _, p := range s.providers {
-		if !p.IsAvailable(ctx) {
-			continue
-		}
-		prompt, err := p.GenerateImagePrompt(ctx, news)
-		if err != nil || prompt == "" {
-			continue
-		}
-		return prompt, nil
-	}
-	return "", ErrAllProvidersFailed
 }
 
 func modelOf(p AIProvider) string {

@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
 	"os/exec"
 	"strings"
 
@@ -54,14 +55,6 @@ func (p *TgptProvider) GeneratePostVariants(ctx context.Context, req GeneratePos
 	return parseVariants(out)
 }
 
-func (p *TgptProvider) GenerateImagePrompt(ctx context.Context, news NewsCandidate) (string, error) {
-	out, err := p.run(ctx, buildImagePrompt(news))
-	if err != nil {
-		return "", err
-	}
-	return strings.TrimSpace(out), nil
-}
-
 // run executes the tgpt command with the prompt as a single argument, enforcing
 // the configured timeout. Note: the prompt is logged at debug level but tokens
 // are never part of the prompt, so nothing sensitive is logged.
@@ -70,10 +63,12 @@ func (p *TgptProvider) run(ctx context.Context, prompt string) (string, error) {
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, p.cfg.Command, prompt)
+	cmd.Env = allowedEnvironment(p.cfg.AllowedEnv)
 
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
+	stdout := newLimitedBuffer(2 << 20)
+	stderr := newLimitedBuffer(64 << 10)
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
 
 	if err := cmd.Run(); err != nil {
 		if ctx.Err() == context.DeadlineExceeded {
@@ -88,6 +83,46 @@ func (p *TgptProvider) run(ctx context.Context, prompt string) (string, error) {
 		return "", fmt.Errorf("tgpt returned empty output")
 	}
 	return out, nil
+}
+
+type limitedBuffer struct {
+	buf       bytes.Buffer
+	remaining int
+}
+
+func newLimitedBuffer(limit int) *limitedBuffer { return &limitedBuffer{remaining: limit} }
+
+func (b *limitedBuffer) Write(p []byte) (int, error) {
+	original := len(p)
+	if len(p) > b.remaining {
+		p = p[:b.remaining]
+	}
+	if len(p) > 0 {
+		_, _ = b.buf.Write(p)
+		b.remaining -= len(p)
+	}
+	return original, nil
+}
+
+func (b *limitedBuffer) String() string { return b.buf.String() }
+
+func allowedEnvironment(names []string) []string {
+	env := make([]string, 0, len(names))
+	seen := make(map[string]struct{}, len(names))
+	for _, name := range names {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		if _, ok := seen[name]; ok {
+			continue
+		}
+		seen[name] = struct{}{}
+		if value, ok := os.LookupEnv(name); ok {
+			env = append(env, name+"="+value)
+		}
+	}
+	return env
 }
 
 func truncate(s string, n int) string {

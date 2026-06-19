@@ -10,18 +10,21 @@ import (
 
 	"ai-social-publisher/internal/approval"
 	"ai-social-publisher/internal/config"
+	"ai-social-publisher/internal/storage"
 )
 
 // Scheduler owns the background goroutines.
 type Scheduler struct {
-	cfg      config.SchedulerConfig
-	approval *approval.Service
-	logger   *slog.Logger
-	wg       sync.WaitGroup
+	cfg           config.SchedulerConfig
+	approval      *approval.Service
+	logger        *slog.Logger
+	storage       *storage.LocalStorage
+	retentionDays int
+	wg            sync.WaitGroup
 }
 
-func New(cfg config.SchedulerConfig, svc *approval.Service, logger *slog.Logger) *Scheduler {
-	return &Scheduler{cfg: cfg, approval: svc, logger: logger.With("component", "scheduler")}
+func New(cfg config.SchedulerConfig, svc *approval.Service, store *storage.LocalStorage, retentionDays int, logger *slog.Logger) *Scheduler {
+	return &Scheduler{cfg: cfg, approval: svc, storage: store, retentionDays: retentionDays, logger: logger.With("component", "scheduler")}
 }
 
 // Start launches the worker loops. They stop when ctx is cancelled. Start
@@ -46,6 +49,43 @@ func (s *Scheduler) Start(ctx context.Context) {
 	s.run(ctx, "waiting-ai-retry", time.Duration(s.cfg.WaitingAIRetryIntervalMinutes)*time.Minute, false, func(ctx context.Context) {
 		if err := s.approval.RetryWaitingAI(ctx); err != nil {
 			s.logger.Error("waiting-ai retry error", "error", err)
+		}
+	})
+
+	s.run(ctx, "scoring-work", time.Duration(s.cfg.WorkIntervalSeconds)*time.Second, true, func(ctx context.Context) {
+		if err := s.approval.ProcessScoringQueue(ctx); err != nil {
+			s.logger.Error("scoring queue error", "error", err)
+		}
+	})
+
+	s.run(ctx, "variant-work", time.Duration(s.cfg.WorkIntervalSeconds)*time.Second, true, func(ctx context.Context) {
+		if err := s.approval.ProcessVariantQueue(ctx); err != nil {
+			s.logger.Error("variant queue error", "error", err)
+		}
+	})
+
+	s.run(ctx, "notifications", time.Duration(s.cfg.NotificationIntervalSeconds)*time.Second, true, func(ctx context.Context) {
+		if err := s.approval.RepairNotifications(ctx); err != nil {
+			s.logger.Error("notification repair error", "error", err)
+		}
+		if err := s.approval.DeliverNotifications(ctx); err != nil {
+			s.logger.Error("notification delivery error", "error", err)
+		}
+	})
+
+	s.run(ctx, "stale-job-recovery", time.Minute, false, func(ctx context.Context) {
+		if err := s.approval.RecoverStaleJobs(ctx); err != nil {
+			s.logger.Error("stale job recovery error", "error", err)
+		}
+	})
+
+	s.run(ctx, "media-cleanup", 24*time.Hour, false, func(ctx context.Context) {
+		cutoff := time.Now().Add(-time.Duration(s.retentionDays) * 24 * time.Hour)
+		removed, err := s.storage.Cleanup(ctx, cutoff)
+		if err != nil {
+			s.logger.Error("media cleanup error", "error", err)
+		} else if removed > 0 {
+			s.logger.Info("expired media removed", "count", removed)
 		}
 	})
 

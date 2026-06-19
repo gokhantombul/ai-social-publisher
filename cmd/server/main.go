@@ -24,6 +24,7 @@ import (
 	"ai-social-publisher/internal/instagram"
 	"ai-social-publisher/internal/media"
 	"ai-social-publisher/internal/news"
+	"ai-social-publisher/internal/outbox"
 	"ai-social-publisher/internal/post"
 	"ai-social-publisher/internal/scheduler"
 	"ai-social-publisher/internal/storage"
@@ -46,9 +47,11 @@ func run() error {
 		args = args[1:]
 	}
 
-	fs := flag.NewFlagSet(command, flag.ExitOnError)
+	fs := flag.NewFlagSet(command, flag.ContinueOnError)
 	configPath := fs.String("config", "", "path to config file (default: config.yaml, falls back to config.example.yaml)")
-	_ = fs.Parse(args)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
 
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
 
@@ -106,6 +109,7 @@ func serve(cfg *config.Config, db *sql.DB, logger *slog.Logger) error {
 	accountRepo := account.NewRepository(db)
 	newsRepo := news.NewRepository(db)
 	postRepo := post.NewRepository(db)
+	outboxRepo := outbox.NewRepository(db)
 
 	if err := accountRepo.SyncFromConfig(ctx, cfg.Accounts); err != nil {
 		return fmt.Errorf("sync accounts: %w", err)
@@ -144,11 +148,12 @@ func serve(cfg *config.Config, db *sql.DB, logger *slog.Logger) error {
 		Storage:    store,
 		Publisher:  publisher,
 		NewsClient: newsClient,
+		Outbox:     outboxRepo,
 		Logger:     logger,
 	})
 
 	// Background workers.
-	sched := scheduler.New(cfg.Scheduler, approvalSvc, logger)
+	sched := scheduler.New(cfg.Scheduler, approvalSvc, store, cfg.Storage.RetentionDays, logger)
 	sched.Start(ctx)
 
 	// HTTP server.
@@ -159,6 +164,8 @@ func serve(cfg *config.Config, db *sql.DB, logger *slog.Logger) error {
 		Posts:     postRepo,
 		Approval:  approvalSvc,
 		Logger:    logger,
+		DB:        db,
+		Outbox:    outboxRepo,
 		StaticDir: store.BaseDir(),
 	})
 
@@ -221,8 +228,13 @@ func loadDotEnv(path string, logger *slog.Logger) {
 		key = strings.TrimSpace(key)
 		value = strings.Trim(strings.TrimSpace(value), `"'`)
 		if _, exists := os.LookupEnv(key); !exists {
-			_ = os.Setenv(key, value)
+			if err := os.Setenv(key, value); err != nil {
+				logger.Warn("failed to set environment variable", "key", key, "error", err)
+			}
 		}
+	}
+	if err := scanner.Err(); err != nil {
+		logger.Warn("failed while reading .env file", "path", path, "error", err)
 	}
 	logger.Info("loaded .env file", "path", path)
 }

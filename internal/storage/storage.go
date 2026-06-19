@@ -6,9 +6,11 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"ai-social-publisher/internal/config"
 )
@@ -50,19 +52,35 @@ func (s *LocalStorage) BaseDir() string { return s.baseDir }
 // Upload copies filePath into the base directory (if not already there) and
 // returns its public URL. If the source is already inside baseDir it is kept.
 func (s *LocalStorage) Upload(ctx context.Context, filePath string) (*UploadedFile, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	info, err := os.Stat(filePath)
+	if err != nil {
+		return nil, fmt.Errorf("stat upload source: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("upload source is not a regular file")
+	}
 	name := filepath.Base(filePath)
 	dest := filepath.Join(s.baseDir, name)
 
-	if abs, err := filepath.Abs(filePath); err == nil {
-		if destAbs, derr := filepath.Abs(dest); derr == nil && abs != destAbs {
-			if err := copyFile(filePath, dest); err != nil {
-				return nil, err
-			}
+	abs, err := filepath.Abs(filePath)
+	if err != nil {
+		return nil, fmt.Errorf("resolve upload source: %w", err)
+	}
+	destAbs, err := filepath.Abs(dest)
+	if err != nil {
+		return nil, fmt.Errorf("resolve upload destination: %w", err)
+	}
+	if abs != destAbs {
+		if err := copyFile(filePath, dest); err != nil {
+			return nil, err
 		}
 	}
 
 	return &UploadedFile{
-		PublicURL: s.publicBaseURL + "/" + name,
+		PublicURL: s.publicBaseURL + "/" + url.PathEscape(name),
 		LocalPath: dest,
 	}, nil
 }
@@ -74,14 +92,56 @@ func copyFile(src, dst string) error {
 	}
 	defer in.Close()
 
-	out, err := os.Create(dst)
+	out, err := os.CreateTemp(filepath.Dir(dst), ".upload-*")
 	if err != nil {
 		return fmt.Errorf("create dest: %w", err)
 	}
-	defer out.Close()
+	tmpName := out.Name()
+	defer os.Remove(tmpName) //nolint:errcheck
 
 	if _, err := io.Copy(out, in); err != nil {
+		_ = out.Close()
 		return fmt.Errorf("copy file: %w", err)
 	}
+	if err := out.Sync(); err != nil {
+		_ = out.Close()
+		return fmt.Errorf("sync dest: %w", err)
+	}
+	if err := out.Close(); err != nil {
+		return fmt.Errorf("close dest: %w", err)
+	}
+	if err := os.Chmod(tmpName, 0o644); err != nil {
+		return fmt.Errorf("chmod dest: %w", err)
+	}
+	if err := os.Rename(tmpName, dst); err != nil {
+		return fmt.Errorf("commit dest: %w", err)
+	}
 	return nil
+}
+
+// Cleanup removes generated regular files older than cutoff. Symlinks and
+// directories are never followed or removed.
+func (s *LocalStorage) Cleanup(ctx context.Context, cutoff time.Time) (int, error) {
+	entries, err := os.ReadDir(s.baseDir)
+	if err != nil {
+		return 0, err
+	}
+	removed := 0
+	for _, entry := range entries {
+		if err := ctx.Err(); err != nil {
+			return removed, err
+		}
+		if strings.HasPrefix(entry.Name(), ".") {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil || !info.Mode().IsRegular() || !info.ModTime().Before(cutoff) {
+			continue
+		}
+		if err := os.Remove(filepath.Join(s.baseDir, entry.Name())); err != nil {
+			return removed, fmt.Errorf("remove expired media %q: %w", entry.Name(), err)
+		}
+		removed++
+	}
+	return removed, nil
 }

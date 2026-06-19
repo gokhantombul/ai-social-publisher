@@ -70,7 +70,7 @@ Akış:
        │        │                                                       └─▶ instagram.Publisher ──────────┼─▶ Instagram Graph API
        └────────┼─▶ POST /api/telegram/callback ─▶ approval.Service                                        │
                 │                                                                                          │
-                │   scheduler (news-sync · waiting-ai-retry · publish-approved)   PostgreSQL               │
+                │   scheduler (queues · retry · outbox · publish)                 PostgreSQL               │
                 └──────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -88,6 +88,9 @@ tek yönlüdür ve `approval` paketi orkestrasyonu yapar.
 | **Instagram Graph** | İçeriği bu uygulama yayınlar. Telegram'ın yayınla yetkisi yoktur. |
 | **AI sağlayıcılar** | `tgpt` (CLI) primary, **Ollama** (HTTP) fallback.                 |
 
+`haber-servisi` ve `telegram-servisi` çağrıları ayrı Bearer token'larla kimlik
+doğrular (`NEWS_SERVICE_AUTH_TOKEN`, `TELEGRAM_SERVICE_AUTH_TOKEN`).
+
 ---
 
 ## AI provider chain mantığı
@@ -96,8 +99,8 @@ Sıra **kesinlikle** şöyledir:
 
 1. **Primary:** `tgpt` CLI
 2. **Fallback:** Ollama HTTP API
-3. İkisi de başarısız olursa ilgili job **`WAITING_AI`** durumuna alınır ve
-   scheduler tarafından periyodik olarak tekrar denenir. Sistem **durmaz**.
+3. İkisi de başarısız olursa ilgili job **`WAITING_AI`** durumuna alınır;
+   exponential backoff ile en fazla 8 kez denenir, sonra `FAILED` olur.
 
 ```go
 // internal/ai/service.go
@@ -115,7 +118,6 @@ type AIProvider interface {
     IsAvailable(ctx context.Context) bool
     ScoreNews(ctx context.Context, news NewsCandidate) (*NewsScore, error)
     GeneratePostVariants(ctx context.Context, req GeneratePostVariantsRequest) ([]PostVariant, error)
-    GenerateImagePrompt(ctx context.Context, news NewsCandidate) (string, error)
 }
 ```
 
@@ -125,6 +127,8 @@ type AIProvider interface {
 - tgpt timeout / hata / boş çıktı / geçersiz JSON dönerse Ollama denenir.
 - Markdown kod bloğu (` ```json `) gelirse temizlenir (`internal/ai/parse.go`).
 - AI çıktısı her zaman JSON beklenir; skorlar `0-100` aralığına clamp edilir.
+- Enum değerleri, caption uzunluğu ve istenen alternatif sayısı doğrulanır.
+- Haber metni güvenilmeyen veri olarak ayrılır; metin içindeki talimatlar uygulanmaz.
 - **Token / hassas veri loglanmaz.**
 
 ---
@@ -255,13 +259,24 @@ accounts:
     instagram_user_id: "${IG_TECH_USER_ID}"
     variant_count: 5         # dinamik alternatif sayısı (sabit değil!)
     notify_threshold: 80
-    auto_publish: false
     styles: ["Kısa ve vurucu", "Haber dili", ...]
 ```
 
 `${VAR}` placeholder'ları yükleme anında ortam değişkenlerinden genişletilir.
 Hesaplar açılışta `social_accounts` tablosuna upsert edilir (config = doğruluk
 kaynağı).
+
+Config strict olarak ayrıştırılır: bilinmeyen YAML alanları, eksik environment
+variable'ları ve geçersiz URL/eşik değerleri uygulamayı başlatmaz.
+
+Yönetim API'si ve Telegram callback güvenliği:
+
+```yaml
+security:
+  api_token: "${API_AUTH_TOKEN}"                       # minimum 32 karakter
+  telegram_callback_secret: "${TELEGRAM_CALLBACK_SECRET}"
+  allowed_telegram_users: ["${TELEGRAM_ALLOWED_USER}"]
+```
 
 ---
 
@@ -287,6 +302,8 @@ POST /{ig_user_id}/media_publish   (creation_id)         → instagram_media_id
 - `access_token` form gövdesinde gönderilir, **asla loglanmaz**.
 - İlk sürümde yalnızca **single image** desteklenir; reels/story/carousel için
   yapı genişletilebilir bırakılmıştır.
+- Gerçek yayın modunda `public_base_url` public olarak erişilebilir HTTPS adresi
+  olmalıdır; localhost config'i yalnızca dry-run içindir.
 
 ---
 
@@ -297,6 +314,7 @@ POST /{ig_user_id}/media_publish   (creation_id)         → instagram_media_id
 ```json
 {
   "channel": "telegram",
+  "idempotencyKey": "first-approval:42",
   "title": "🔥 Önemli haber bulundu",
   "message": "Başlık: ...\nSkor: 91/100\nKategori: teknoloji",
   "buttons": [
@@ -313,17 +331,23 @@ POST /{ig_user_id}/media_publish   (creation_id)         → instagram_media_id
   "payload": "<postJobId | variantId>", "user": "gokhan" }
 ```
 
+Unix timestamp ve gövde `timestamp.body` biçiminde `TELEGRAM_CALLBACK_SECRET`
+ile HMAC-SHA256 imzalanmalı; timestamp `X-Telegram-Timestamp`, hex imza
+`X-Telegram-Signature` header'ında gönderilmelidir. Beş dakikadan eski istekler
+ve allowlist dışında kalan `user` değerleri reddedilir.
+
 İki aşamalı onay:
 
 1. **1. aşama** — Önemli haber → `WAITING_FIRST_APPROVAL` → `Post Hazırla` / `Geç`.
-2. **2. aşama** — `Post Hazırla` → `variant_count` kadar alternatif üretilir →
+2. **2. aşama** — `Post Hazırla` işi kuyruğa alır → `variant_count` kadar alternatif üretilir →
    `WAITING_VARIANT_APPROVAL` → **dinamik** butonlar:
 
    ```
    [1. Alternatif] [2. Alternatif] ... [N. Alternatif] [Yeniden Üret] [İptal]
    ```
 
-   Buton sayısı `variants.length` kadardır (sabit değildir). `SELECT_VARIANT`
+   Her caption seçimden önce ayrı bir Telegram mesajında gösterilir. Buton sayısı
+   `variants.length` kadardır (sabit değildir). `SELECT_VARIANT`
    payload'ı `variantId` taşır; seçimle job `APPROVED → PUBLISHING → PUBLISHED`
    yoluna girer.
 
@@ -349,17 +373,17 @@ compose'tan alır. Ollama'ya host üzerinden erişmek için
 
 | Method | Path                          | Açıklama                              |
 |--------|-------------------------------|---------------------------------------|
-| GET    | `/health`                     | Sağlık kontrolü                       |
+| GET    | `/live`                       | Liveness                              |
+| GET    | `/health`, `/ready`           | DB readiness                          |
 | GET    | `/api/accounts`               | Hesapları listele                     |
-| POST   | `/api/accounts`               | Hesap oluştur                         |
-| POST   | `/api/news/sync`              | Haberleri çek + skorla                |
+| POST   | `/api/news/sync`              | Haberleri çek + skorlama kuyruğuna al |
 | GET    | `/api/news/candidates`        | Haber adaylarını listele              |
 | GET    | `/api/posts`                  | Post joblarını listele                |
 | GET    | `/api/posts/{id}`             | Job + alternatiflerini getir          |
 | POST   | `/api/posts/{id}/generate`    | Alternatif üretimini başlat           |
 | POST   | `/api/posts/{id}/approve`     | Alternatif seç (`{"variantId": N}`)   |
 | POST   | `/api/posts/{id}/reject`      | Jobu atla (`SKIPPED`)                 |
-| POST   | `/api/posts/{id}/publish`     | Seçili alternatifi yayınla            |
+| POST   | `/api/posts/{id}/publish`     | Seçili alternatifi yayın kuyruğuna al |
 | POST   | `/api/telegram/callback`      | Telegram callback giriş noktası       |
 | GET    | `/api/analytics/posts`        | Durum bazlı özet                      |
 | GET    | `/static/*`                   | Üretilen görseller (public URL)       |
@@ -368,26 +392,32 @@ compose'tan alır. Ollama'ya host üzerinden erişmek için
 # Sağlık
 curl -s localhost:8080/health
 
+# Yönetim endpoint'lerinin tamamında Bearer token zorunludur
+AUTH="Authorization: Bearer ${API_AUTH_TOKEN}"
+
 # Hesaplar
-curl -s localhost:8080/api/accounts | jq
+curl -s -H "$AUTH" localhost:8080/api/accounts | jq
 
 # Haber senkronizasyonu (haber-servisi gerekir)
-curl -s -X POST localhost:8080/api/news/sync
+curl -s -X POST -H "$AUTH" localhost:8080/api/news/sync
 
 # Bir job için alternatif üret
-curl -s -X POST localhost:8080/api/posts/1/generate
+curl -s -X POST -H "$AUTH" localhost:8080/api/posts/1/generate
 
 # Alternatif seç → görsel + (dry-run) yayın
 curl -s -X POST localhost:8080/api/posts/1/approve \
-  -H 'Content-Type: application/json' -d '{"variantId": 1}'
+  -H "$AUTH" -H 'Content-Type: application/json' -d '{"variantId": 1}'
 
 # Telegram callback simülasyonu: "Post Hazırla"
+BODY='{"action":"GENERATE_POST","payload":"1","user":"gokhan"}'
+TS=$(date +%s)
+SIG=$(printf '%s.%s' "$TS" "$BODY" | openssl dgst -sha256 -hmac "$TELEGRAM_CALLBACK_SECRET" -hex | awk '{print $2}')
 curl -s -X POST localhost:8080/api/telegram/callback \
-  -H 'Content-Type: application/json' \
-  -d '{"action":"GENERATE_POST","payload":"1","user":"gokhan"}'
+  -H 'Content-Type: application/json' -H "X-Telegram-Timestamp: $TS" \
+  -H "X-Telegram-Signature: $SIG" -d "$BODY"
 
 # Analitik
-curl -s localhost:8080/api/analytics/posts | jq
+curl -s -H "$AUTH" localhost:8080/api/analytics/posts | jq
 ```
 
 ---
@@ -399,16 +429,17 @@ curl -s localhost:8080/api/analytics/posts | jq
 
 ```
 NEW
- ├─▶ WAITING_AI ─▶ SCORED            (AI sağlayıcılar geri geldiğinde retry)
- └─▶ SCORED
+ └─▶ SCORING_QUEUED ─▶ SCORING
+                         ├─▶ WAITING_AI ─▶ SCORING_QUEUED / VARIANTS_QUEUED
+                         └─▶ SCORED
         ├─▶ SKIPPED                  (eşik altı / accountFit=skip)
         └─▶ WAITING_FIRST_APPROVAL   (Telegram 1. onay bildirimi)
-               ├─▶ SKIPPED           ("Geç")
-               └─▶ GENERATING_VARIANTS  ("Post Hazırla")
+               ├─▶ SKIPPED            ("Geç")
+               └─▶ VARIANTS_QUEUED ─▶ GENERATING_VARIANTS
                       ├─▶ WAITING_AI    (AI yine başarısız → retry)
                       └─▶ WAITING_VARIANT_APPROVAL  (dinamik butonlar)
                              ├─▶ SKIPPED              ("İptal")
-                             ├─▶ GENERATING_VARIANTS  ("Yeniden Üret")
+                             ├─▶ VARIANTS_QUEUED      ("Yeniden Üret")
                              └─▶ APPROVED             (alternatif seçildi)
                                     └─▶ PUBLISHING ─▶ PUBLISHED
                                                    └─▶ FAILED
@@ -440,6 +471,8 @@ type Storage interface {
 Varsayılan `Storage` implementasyonu **local** sürücüdür: dosyayı `base_dir`
 altına yazar ve `public_base_url` ile birleştirerek public URL üretir. Bu URL
 `GET /static/*` üzerinden servis edilir, böylece Instagram görseli çekebilir.
+Üretilen dosyalar `storage.retention_days` süresinden sonra günlük worker ile
+temizlenir.
 
 ---
 
@@ -469,6 +502,7 @@ ai-social-publisher
 │   ├── instagram/              # Graph API publisher (dry-run destekli)
 │   ├── media/                  # template renderer (PNG kart)
 │   ├── news/                   # candidate/score repo + haber-servisi client
+│   ├── outbox/                 # dayanıklı Telegram teslimatı + backoff
 │   ├── post/                   # job/variant/publish_log repo + status FSM
 │   ├── scheduler/              # in-process worker'lar
 │   ├── storage/                # Storage arayüzü + local sürücü
@@ -485,19 +519,25 @@ ai-social-publisher
 
 ```bash
 make test        # go test ./...
+make test-race   # race detector
 make vet         # go vet ./...
+make vuln        # govulncheck ./...
 ```
 
-Birim testler: AI JSON ayrıştırma/temizleme (`internal/ai`), durum makinesi
-geçişleri (`internal/post`) ve config defaults/clamp/validation
-(`internal/config`).
+Birim testlere ek olarak API auth/HMAC ve gerçek PostgreSQL üzerinde atomik
+worker claim entegrasyon testi bulunur. CI; format, vet, race detector, migration,
+vulnerability scan, binary ve container build adımlarını çalıştırır.
 
 ---
 
 ## Hata yönetimi ilkeleri
 
-- AI provider hataları sistemi durdurmaz → ilgili job `WAITING_AI`.
+- AI provider hataları sistemi durdurmaz → bounded backoff ile `WAITING_AI`.
 - Instagram publish hataları `publish_logs` tablosuna yazılır, job `FAILED` olur.
+- Telegram bildirimleri outbox üzerinden retry edilir; 10 denemeden sonra dead-letter olur.
+- Worker'lar işleri atomik claim eder; aynı post iki worker tarafından yayınlanamaz.
+- Yarım kalan AI işleri geri kazanılır. Sonucu belirsiz Instagram isteği otomatik
+  tekrar edilmez; olası duplicate yerine manuel uzlaştırma istenir.
 - JSON parse hatasında fallback provider denenir.
 - Duplicate haberler tekrar işlenmez (`external_news_id` + job tekilliği).
 - Tüm timeout'lar config'ten gelir.

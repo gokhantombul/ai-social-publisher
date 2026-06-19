@@ -4,10 +4,10 @@ services:
     container_name: aisp-postgres
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-aisp}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-aisp_secret}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
       POSTGRES_DB: ${POSTGRES_DB:-ai_social_publisher}
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -26,9 +26,11 @@ services:
         condition: service_healthy
     environment:
       # Inside the compose network postgres is reachable by service name.
-      DATABASE_URL: postgres://${POSTGRES_USER:-aisp}:${POSTGRES_PASSWORD:-aisp_secret}@postgres:5432/${POSTGRES_DB:-ai_social_publisher}?sslmode=disable
-      NEWS_SERVICE_BASE_URL: ${NEWS_SERVICE_BASE_URL:-http://localhost:9001}
-      TELEGRAM_SERVICE_BASE_URL: ${TELEGRAM_SERVICE_BASE_URL:-http://localhost:9002}
+      DATABASE_URL: postgres://${POSTGRES_USER:-aisp}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/${POSTGRES_DB:-ai_social_publisher}?sslmode=disable
+      NEWS_SERVICE_BASE_URL: ${NEWS_SERVICE_BASE_URL:-http://host.docker.internal:9001}
+      TELEGRAM_SERVICE_BASE_URL: ${TELEGRAM_SERVICE_BASE_URL:-http://host.docker.internal:9002}
+      NEWS_SERVICE_AUTH_TOKEN: ${NEWS_SERVICE_AUTH_TOKEN:?NEWS_SERVICE_AUTH_TOKEN is required}
+      TELEGRAM_SERVICE_AUTH_TOKEN: ${TELEGRAM_SERVICE_AUTH_TOKEN:?TELEGRAM_SERVICE_AUTH_TOKEN is required}
       TGPT_COMMAND: ${TGPT_COMMAND:-tgpt}
       OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
       OLLAMA_MODEL: ${OLLAMA_MODEL:-llama3.1:8b}
@@ -38,11 +40,25 @@ services:
       IG_NEWS_USER_ID: ${IG_NEWS_USER_ID:-0}
       IG_ECONOMY_USER_ID: ${IG_ECONOMY_USER_ID:-0}
       PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-http://localhost:8080/static}
+      APP_ENV: ${APP_ENV:-development}
+      HTTP_PORT: ${HTTP_PORT:-8080}
+      API_AUTH_TOKEN: ${API_AUTH_TOKEN:?API_AUTH_TOKEN is required}
+      TELEGRAM_CALLBACK_SECRET: ${TELEGRAM_CALLBACK_SECRET:?TELEGRAM_CALLBACK_SECRET is required}
+      TELEGRAM_ALLOWED_USER: ${TELEGRAM_ALLOWED_USER:?TELEGRAM_ALLOWED_USER is required}
     ports:
       - "8080:8080"
     command: ["serve", "--config", "/app/config.example.yaml"]
     volumes:
       - uploads:/app/storage/uploads
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://localhost:8080/ready"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
 
 volumes:
   pgdata:

@@ -1,0 +1,11 @@
+.git
+.idea
+.agents
+.codex
+.env
+config.yaml
+bin
+server
+storage/uploads/*
+*.test
+*.out
