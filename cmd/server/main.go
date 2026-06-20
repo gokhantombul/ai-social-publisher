@@ -16,6 +16,7 @@ import (
 	"syscall"
 
 	"ai-social-publisher/internal/account"
+	"ai-social-publisher/internal/admin"
 	"ai-social-publisher/internal/ai"
 	"ai-social-publisher/internal/approval"
 	"ai-social-publisher/internal/config"
@@ -152,6 +153,14 @@ func serve(cfg *config.Config, db *sql.DB, logger *slog.Logger) error {
 		Logger:     logger,
 	})
 
+	adminHandler, err := admin.New(admin.Deps{
+		Config: cfg, DB: db, Approval: approvalSvc, Accounts: accountRepo,
+		Posts: postRepo, Outbox: outboxRepo, Logger: logger,
+	})
+	if err != nil {
+		return fmt.Errorf("initialize admin console: %w", err)
+	}
+
 	// Background workers.
 	sched := scheduler.New(cfg.Scheduler, approvalSvc, store, cfg.Storage.RetentionDays, logger)
 	sched.Start(ctx)
@@ -167,6 +176,7 @@ func serve(cfg *config.Config, db *sql.DB, logger *slog.Logger) error {
 		DB:        db,
 		Outbox:    outboxRepo,
 		StaticDir: store.BaseDir(),
+		Admin:     adminHandler,
 	})
 
 	serverErr := make(chan error, 1)

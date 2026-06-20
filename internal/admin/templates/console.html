@@ -1,0 +1,323 @@
+{{define "login"}}
+<!doctype html>
+<html lang="tr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>Giriş · AI Social Publisher</title>
+  <link rel="stylesheet" href="/assets/app.css">
+</head>
+<body class="login-body">
+  <main class="login-shell">
+    <section class="login-card" aria-labelledby="login-title">
+      <div class="brand-mark" aria-hidden="true">AP</div>
+      <p class="eyebrow">AI SOCIAL PUBLISHER</p>
+      <h1 id="login-title">Yayın masasına dön.</h1>
+      <p class="muted">Operasyon paneline erişmek için yönetici API token’ını kullan.</p>
+      {{if .Flash}}<div class="flash error" role="alert">{{.Flash}}</div>{{end}}
+      <form method="post" action="/login" class="stack-form">
+        <label for="token">Yönetici token’ı</label>
+        <input id="token" name="token" type="password" autocomplete="current-password" required autofocus>
+        <button class="button primary wide" type="submit">Güvenli giriş</button>
+      </form>
+      <p class="login-foot">Token tarayıcıda saklanmaz · Oturum 8 saat geçerlidir</p>
+    </section>
+  </main>
+</body>
+</html>
+{{end}}
+
+{{define "layout"}}
+<!doctype html>
+<html lang="tr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <meta name="csrf-token" content="{{.CSRF}}">
+  <title>{{.Title}} · AI Social Publisher</title>
+  <link rel="stylesheet" href="/assets/app.css">
+  <script src="/assets/htmx.min.js" defer></script>
+  <script src="/assets/app.js" defer></script>
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar">
+      <a class="brand" href="/admin" aria-label="AI Social Publisher ana sayfa">
+        <span class="brand-mark">AP</span>
+        <span><strong>AI Social</strong><small>Publisher</small></span>
+      </a>
+      <nav class="nav" aria-label="Ana menü">
+        <a href="/admin" class="{{if eq .Page "dashboard"}}active{{end}}"><span class="nav-dot gold"></span>Yayın Masası</a>
+        <a href="/admin/posts" class="{{if or (eq .Page "posts") (eq .Page "post-detail")}}active{{end}}"><span class="nav-dot violet"></span>Post Kuyruğu</a>
+        <a href="/admin/news" class="{{if eq .Page "news"}}active{{end}}"><span class="nav-dot cyan"></span>Haber Adayları</a>
+        <a href="/admin/accounts" class="{{if eq .Page "accounts"}}active{{end}}"><span class="nav-dot green"></span>Kanallar</a>
+        <a href="/admin/system" class="{{if eq .Page "system"}}active{{end}}"><span class="nav-dot slate"></span>Sistem</a>
+      </nav>
+      <div class="sidebar-foot">
+        <span class="live-dot"></span><span>Operasyon paneli</span>
+        <form method="post" action="/logout">
+          <input type="hidden" name="_csrf" value="{{.CSRF}}">
+          <button class="link-button" type="submit">Çıkış</button>
+        </form>
+      </div>
+    </aside>
+    <div class="main-column">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">OPERASYON KONSOLU</p>
+          <h1>{{.Title}}</h1>
+        </div>
+        <div class="topbar-meta"><span class="pulse"></span>Canlı sistem</div>
+      </header>
+      <main class="content">
+        {{template "page-content" .}}
+      </main>
+    </div>
+  </div>
+</body>
+</html>
+{{end}}
+
+{{define "page-content"}}
+  {{if eq .Page "dashboard"}}{{template "dashboard-fragment" .}}{{end}}
+  {{if eq .Page "posts"}}{{template "posts-page" .}}{{end}}
+  {{if eq .Page "post-detail"}}{{template "job-fragment" .}}{{end}}
+  {{if eq .Page "news"}}{{template "news-page" .}}{{end}}
+  {{if eq .Page "accounts"}}{{template "accounts-page" .}}{{end}}
+  {{if eq .Page "system"}}{{template "system-page" .}}{{end}}
+{{end}}
+
+{{define "flash"}}
+  {{if .Flash}}<div class="flash {{if .FlashError}}error{{else}}success{{end}}" role="status">{{.Flash}}</div>{{end}}
+{{end}}
+
+{{define "dashboard-fragment"}}
+<section id="dashboard" hx-get="/admin/fragments/dashboard" hx-trigger="every 10s" hx-swap="outerHTML">
+  {{template "flash" .}}
+  <div class="section-heading split">
+    <div><h2>Bugünün kontrol odası</h2><p>Kuyruk, onay ve dağıtım akışının tek bakışta özeti.</p></div>
+    <form hx-post="/admin/news/sync" hx-target="#dashboard" hx-swap="outerHTML" method="post" action="/admin/news/sync">
+      <input type="hidden" name="_csrf" value="{{.CSRF}}">
+      <button class="button secondary" type="submit"><span>↻</span> Haberleri şimdi çek</button>
+    </form>
+  </div>
+  <div class="metric-grid">
+    <article class="metric-card featured"><span class="metric-label">Onay bekleyen</span><strong>{{.Dashboard.NeedsAttention}}</strong><small>Editoryal karar gerekli</small></article>
+    <article class="metric-card"><span class="metric-label">İşleniyor</span><strong>{{.Dashboard.Processing}}</strong><small>AI ve yayın worker’ları</small></article>
+    <article class="metric-card"><span class="metric-label">Yayınlandı</span><strong>{{.Dashboard.Published}}</strong><small>Toplam başarılı post</small></article>
+    <article class="metric-card {{if gt .Dashboard.Failed 0}}danger-card{{end}}"><span class="metric-label">Müdahale gerekli</span><strong>{{.Dashboard.Failed}}</strong><small>Başarısız iş</small></article>
+  </div>
+  <div class="dashboard-grid">
+    <section class="panel panel-large">
+      <div class="panel-head"><div><p class="eyebrow">SON HAREKETLER</p><h3>Post akışı</h3></div><a href="/admin/posts">Tümünü gör →</a></div>
+      <div class="job-list">
+        {{range .Dashboard.Recent}}
+        <a class="job-row" href="/admin/posts/{{.ID}}">
+          <span class="category-token category-{{.Category}}">{{.AccountCode}}</span>
+          <span class="job-copy"><strong>{{.Title}}</strong><small>{{.Source}} · {{formatTime .UpdatedAt}}</small></span>
+          <span class="status {{statusClass .Status}}">{{statusLabel .Status}}</span>
+        </a>
+        {{else}}<div class="empty-state">Henüz post işi yok. Haberleri çekerek başlayabilirsin.</div>{{end}}
+      </div>
+    </section>
+    <aside class="panel">
+      <div class="panel-head"><div><p class="eyebrow">PIPELINE</p><h3>Durum dağılımı</h3></div><span class="total-badge">{{.Dashboard.Total}} iş</span></div>
+      <div class="pipeline-list">
+        {{range .Dashboard.Counts}}
+        <a href="/admin/posts?status={{.Status}}"><span class="status-dot {{statusClass .Status}}"></span><span>{{statusLabel .Status}}</span><strong>{{.Count}}</strong></a>
+        {{else}}<p class="muted">Pipeline boş.</p>{{end}}
+      </div>
+      <div class="outbox-box">
+        <span><small>Bildirim bekleyen</small><strong>{{.Dashboard.OutboxPending}}</strong></span>
+        <span><small>Ölü bildirim</small><strong class="{{if gt .Dashboard.OutboxDead 0}}text-danger{{end}}">{{.Dashboard.OutboxDead}}</strong></span>
+        <span><small>AI bekleyen</small><strong>{{.Dashboard.WaitingAI}}</strong></span>
+      </div>
+    </aside>
+  </div>
+</section>
+{{end}}
+
+{{define "posts-page"}}
+<section>
+  <div class="section-heading"><h2>İçerik üretim hattı</h2><p>Haberden Instagram yayınına kadar her işi filtrele ve incele.</p></div>
+  <form class="filter-bar" method="get" action="/admin/posts">
+    <label><span>Ara</span><input type="search" name="q" value="{{.JobFilters.Query}}" placeholder="Başlık, özet veya kaynak"></label>
+    <label><span>Durum</span><select name="status"><option value="">Tüm durumlar</option>{{range .Statuses}}<option value="{{.Value}}" {{if eq $.JobFilters.Status .Value}}selected{{end}}>{{.Label}}</option>{{end}}</select></label>
+    <label><span>Kategori</span><select name="category"><option value="">Tüm kategoriler</option>{{range .Categories}}<option value="{{.}}" {{if eq $.JobFilters.Category .}}selected{{end}}>{{.}}</option>{{end}}</select></label>
+    <label><span>Kanal</span><select name="account"><option value="">Tüm kanallar</option>{{range .AccountList}}<option value="{{.Code}}" {{if eq $.JobFilters.Account .Code}}selected{{end}}>{{.Name}}</option>{{end}}</select></label>
+    <button class="button secondary" type="submit">Filtrele</button>
+    <a class="button ghost" href="/admin/posts">Temizle</a>
+  </form>
+  <div class="table-card">
+    <div class="table-meta"><span>{{.Jobs.Page.Total}} iş bulundu</span><span>Sayfa {{.Jobs.Page.Page}} / {{.Jobs.Page.TotalPages}}</span></div>
+    <div class="responsive-table">
+      <table>
+        <thead><tr><th>İçerik</th><th>Kanal</th><th>AI skoru</th><th>Durum</th><th>Güncellendi</th><th></th></tr></thead>
+        <tbody>
+        {{range .Jobs.Items}}
+          <tr>
+            <td><div class="title-cell"><strong>{{.Title}}</strong><small>{{.Source}}</small></div></td>
+            <td><span class="category-token category-{{.Category}}">{{.AccountCode}}</span></td>
+            <td>{{if .HasScore}}<span class="score-pill">{{.ImportanceScore}}</span><small class="risk risk-{{.RiskLevel}}">{{.RiskLevel}}</small>{{else}}<span class="muted">—</span>{{end}}</td>
+            <td><span class="status {{statusClass .Status}}">{{statusLabel .Status}}</span></td>
+            <td><time>{{formatTime .UpdatedAt}}</time></td>
+            <td><a class="row-link" href="/admin/posts/{{.ID}}" aria-label="Post detayını aç">→</a></td>
+          </tr>
+        {{else}}<tr><td colspan="6"><div class="empty-state">Bu filtrelerle eşleşen iş bulunamadı.</div></td></tr>{{end}}
+        </tbody>
+      </table>
+    </div>
+    <nav class="pagination" aria-label="Sayfalama">
+      {{if .PrevURL}}<a class="button ghost" href="{{.PrevURL}}">← Önceki</a>{{else}}<span></span>{{end}}
+      {{if .NextURL}}<a class="button ghost" href="{{.NextURL}}">Sonraki →</a>{{end}}
+    </nav>
+  </div>
+</section>
+{{end}}
+
+{{define "job-fragment"}}
+<section id="job-panel" {{if .JobDetail.IsActive}}hx-get="/admin/posts/{{.JobDetail.Job.ID}}/fragment" hx-trigger="every 3s" hx-swap="outerHTML"{{end}}>
+  {{template "flash" .}}
+  <div class="detail-hero">
+    <div>
+      <a class="back-link" href="/admin/posts">← Post kuyruğuna dön</a>
+      <div class="detail-kicker"><span class="category-token category-{{.JobDetail.Job.Category}}">{{.JobDetail.Job.AccountCode}}</span><span>JOB #{{.JobDetail.Job.ID}}</span></div>
+      <h2>{{.JobDetail.Job.Title}}</h2>
+      <p>{{.JobDetail.Job.Summary}}</p>
+      <div class="source-line"><span>{{.JobDetail.Job.Source}}</span>{{if .JobDetail.Job.SourceURL}}<a href="{{.JobDetail.Job.SourceURL}}" target="_blank" rel="noopener noreferrer">Kaynağı aç ↗</a>{{end}}<span>{{formatDate .JobDetail.Job.PublishedAt}}</span></div>
+    </div>
+    <div class="detail-status"><span class="status large {{statusClass .JobDetail.Job.Status}}">{{statusLabel .JobDetail.Job.Status}}</span><small>Son güncelleme {{formatTime .JobDetail.Job.UpdatedAt}}</small></div>
+  </div>
+
+  <div class="detail-grid">
+    <div class="detail-main">
+      {{if .JobDetail.Job.HasScore}}
+      <section class="panel score-panel">
+        <div class="panel-head"><div><p class="eyebrow">AI DEĞERLENDİRMESİ</p><h3>Editoryal sinyaller</h3></div><span class="risk risk-{{.JobDetail.Job.RiskLevel}}">{{.JobDetail.Job.RiskLevel}} risk</span></div>
+        <div class="score-grid"><div><strong>{{.JobDetail.Job.ImportanceScore}}</strong><span>Önem</span></div><div><strong>{{.JobDetail.Job.ViralityScore}}</strong><span>Virallik</span></div><div><strong>{{.JobDetail.Job.AccountFit}}</strong><span>Kanal uyumu</span></div></div>
+        <blockquote>{{.JobDetail.Job.ScoreReason}}</blockquote>
+      </section>
+      {{end}}
+
+      {{if .JobDetail.Variants}}
+      <section>
+        <div class="section-heading compact"><h3>Caption alternatifleri</h3><p>Metni düzenle, kaydet ve yayın için bir varyant seç.</p></div>
+        <div class="variant-list">
+        {{range .JobDetail.Variants}}
+          <article class="variant-card {{if .Selected}}selected{{end}}">
+            <header><div><span class="variant-number">0{{.VariantNo}}</span><strong>{{.Style}}</strong></div>{{if .Selected}}<span class="selected-label">Seçili</span>{{end}}</header>
+            {{if $.JobDetail.CanEdit}}
+            <form hx-post="/admin/posts/{{$.JobDetail.Job.ID}}/variants/{{.ID}}/caption" hx-target="#job-panel" hx-swap="outerHTML" method="post" action="/admin/posts/{{$.JobDetail.Job.ID}}/variants/{{.ID}}/caption">
+              <input type="hidden" name="_csrf" value="{{$.CSRF}}">
+              <textarea name="caption" maxlength="2200" required>{{.Caption}}</textarea>
+              <div class="variant-actions"><small>En fazla 2200 karakter</small><button class="button ghost" type="submit">Metni kaydet</button></div>
+            </form>
+            {{else}}<p class="caption-readonly">{{.Caption}}</p>{{end}}
+            {{if $.JobDetail.CanSelect}}
+            <form hx-post="/admin/posts/{{$.JobDetail.Job.ID}}/select" hx-target="#job-panel" hx-swap="outerHTML" method="post" action="/admin/posts/{{$.JobDetail.Job.ID}}/select">
+              <input type="hidden" name="_csrf" value="{{$.CSRF}}"><input type="hidden" name="variantId" value="{{.ID}}">
+              <button class="button {{if .Selected}}secondary{{else}}primary{{end}} wide" type="submit">{{if .Selected}}Önizlemeyi yenile{{else}}Bu varyantı seç{{end}}</button>
+            </form>
+            {{end}}
+          </article>
+        {{end}}
+        </div>
+      </section>
+      {{end}}
+    </div>
+
+    <aside class="detail-side">
+      {{if and .JobDetail.Selected .JobDetail.Selected.PreviewPath}}
+      <section class="preview-card">
+        <div class="panel-head"><div><p class="eyebrow">GERÇEK ÇIKTI</p><h3>1080 × 1080 önizleme</h3></div><span class="ready-dot"></span></div>
+        <img src="{{.JobDetail.Selected.PreviewPath}}" alt="Seçilen postun gerçek görsel önizlemesi" width="1080" height="1080">
+        <p>Bu görsel mevcut renderer ile üretildi ve Instagram’a gönderilecek varlığın kendisidir.</p>
+      </section>
+      {{else if .JobDetail.Selected}}
+      <section class="panel"><div class="empty-state">Önizleme henüz hazır değil. Seçili varyantı yeniden seçerek üretimi tekrar deneyebilirsin.</div></section>
+      {{end}}
+
+      <section class="panel action-panel">
+        <p class="eyebrow">AKSİYONLAR</p>
+        {{if .JobDetail.CanGenerate}}
+        <form hx-post="/admin/posts/{{.JobDetail.Job.ID}}/generate" hx-target="#job-panel" hx-swap="outerHTML" method="post" action="/admin/posts/{{.JobDetail.Job.ID}}/generate"><input type="hidden" name="_csrf" value="{{.CSRF}}"><button class="button primary wide" type="submit">Alternatif üret</button></form>
+        {{end}}
+        {{if .JobDetail.CanPublish}}
+        <div class="publish-warning"><strong>Son kontrol</strong><p>Bu işlem postu Instagram yayın kuyruğuna alır ve geri alınamaz.</p></div>
+        <form hx-post="/admin/posts/{{.JobDetail.Job.ID}}/publish" hx-target="#job-panel" hx-swap="outerHTML" hx-confirm="Seçili caption ve görsel Instagram yayın kuyruğuna alınacak. Emin misiniz?" method="post" action="/admin/posts/{{.JobDetail.Job.ID}}/publish"><input type="hidden" name="_csrf" value="{{.CSRF}}"><button class="button danger wide" type="submit">Onayla ve yayınla</button></form>
+        {{end}}
+        {{if .JobDetail.CanRegenerate}}
+        <form hx-post="/admin/posts/{{.JobDetail.Job.ID}}/regenerate" hx-target="#job-panel" hx-swap="outerHTML" hx-confirm="Mevcut alternatifler silinip yeniden üretilecek. Devam edilsin mi?" method="post" action="/admin/posts/{{.JobDetail.Job.ID}}/regenerate"><input type="hidden" name="_csrf" value="{{.CSRF}}"><button class="button secondary wide" type="submit">Alternatifleri yeniden üret</button></form>
+        {{end}}
+        {{if .JobDetail.CanSkip}}
+        <form hx-post="/admin/posts/{{.JobDetail.Job.ID}}/skip" hx-target="#job-panel" hx-swap="outerHTML" hx-confirm="Bu içerik atlanacak. Devam edilsin mi?" method="post" action="/admin/posts/{{.JobDetail.Job.ID}}/skip"><input type="hidden" name="_csrf" value="{{.CSRF}}"><button class="button ghost wide" type="submit">İşi atla</button></form>
+        {{end}}
+        {{if not .JobDetail.CanSkip}}{{if not .JobDetail.CanPublish}}{{if not .JobDetail.CanGenerate}}<p class="muted">Bu durumda kullanılabilir manuel aksiyon yok.</p>{{end}}{{end}}{{end}}
+      </section>
+
+      <section class="panel metadata-panel">
+        <p class="eyebrow">TEKNİK DETAY</p>
+        <dl><div><dt>AI sağlayıcı</dt><dd>{{if .JobDetail.Job.AIProvider}}{{.JobDetail.Job.AIProvider}}{{else}}—{{end}}</dd></div><div><dt>Model</dt><dd>{{if .JobDetail.Job.AIModel}}{{.JobDetail.Job.AIModel}}{{else}}—{{end}}</dd></div><div><dt>Deneme</dt><dd>{{.JobDetail.Job.AIRetryCount}}</dd></div><div><dt>Instagram media</dt><dd>{{if .JobDetail.Job.InstagramMediaID}}{{.JobDetail.Job.InstagramMediaID}}{{else}}—{{end}}</dd></div></dl>
+        {{if .JobDetail.Job.AIError}}<div class="error-box"><strong>AI hatası</strong><p>{{.JobDetail.Job.AIError}}</p></div>{{end}}
+        {{if .JobDetail.Job.ErrorMessage}}<div class="error-box"><strong>İş hatası</strong><p>{{.JobDetail.Job.ErrorMessage}}</p></div>{{end}}
+      </section>
+    </aside>
+  </div>
+</section>
+{{end}}
+
+{{define "news-page"}}
+<section>
+  <div class="section-heading split"><div><h2>Haber havuzu</h2><p>Kaynaklardan gelen adayları, AI skorlarını ve bağlı post işlerini izle.</p></div><form hx-post="/admin/news/sync" hx-target="body" method="post" action="/admin/news/sync"><input type="hidden" name="_csrf" value="{{.CSRF}}"><a class="button secondary" href="/admin">Senkronizasyonu panelden başlat</a></form></div>
+  <form class="filter-bar compact-filter" method="get" action="/admin/news">
+    <label><span>Ara</span><input type="search" name="q" value="{{.NewsFilters.Query}}" placeholder="Başlık, özet veya kaynak"></label>
+    <label><span>Kategori</span><select name="category"><option value="">Tüm kategoriler</option>{{range .Categories}}<option value="{{.}}" {{if eq $.NewsFilters.Category .}}selected{{end}}>{{.}}</option>{{end}}</select></label>
+    <button class="button secondary" type="submit">Filtrele</button><a class="button ghost" href="/admin/news">Temizle</a>
+  </form>
+  <div class="news-grid">
+  {{range .News.Items}}
+    <article class="news-card">
+      <header><span class="category-token category-{{.Category}}">{{.Category}}</span>{{if .HasScore}}<span class="score-pill large-score">{{.ImportanceScore}}</span>{{end}}</header>
+      <h3>{{.Title}}</h3><p>{{.Summary}}</p>
+      {{if .HasScore}}<div class="score-reason"><span class="risk risk-{{.RiskLevel}}">{{.RiskLevel}}</span><span>{{.ScoreReason}}</span></div>{{end}}
+      <footer><span>{{.Source}} · {{formatDate .PublishedAt}}</span>{{if .JobID.Valid}}<a href="/admin/posts/{{.JobID.Int64}}"><span class="status {{statusClass .JobStatus}}">{{statusLabel .JobStatus}}</span></a>{{else if .SourceURL}}<a href="{{.SourceURL}}" target="_blank" rel="noopener noreferrer">Kaynak ↗</a>{{end}}</footer>
+    </article>
+  {{else}}<div class="empty-state panel">Bu filtrelerle eşleşen haber adayı yok.</div>{{end}}
+  </div>
+  <nav class="pagination" aria-label="Sayfalama">{{if .PrevURL}}<a class="button ghost" href="{{.PrevURL}}">← Önceki</a>{{else}}<span></span>{{end}}<span>{{.News.Page.Total}} haber · {{.News.Page.Page}} / {{.News.Page.TotalPages}}</span>{{if .NextURL}}<a class="button ghost" href="{{.NextURL}}">Sonraki →</a>{{end}}</nav>
+</section>
+{{end}}
+
+{{define "accounts-page"}}
+<section>
+  <div class="section-heading"><h2>Yayın kanalları</h2><p>Bu bilgiler YAML config’den okunur; panel salt okunur bir operasyon görünümüdür.</p></div>
+  <div class="account-grid">
+  {{range .Accounts}}
+    <article class="account-card category-border-{{.Category}}">
+      <header><span class="category-token category-{{.Category}}">{{.Code}}</span><span class="status {{if .IsActive}}success{{else}}muted{{end}}">{{if .IsActive}}Aktif{{else}}Pasif{{end}}</span></header>
+      <h3>{{.Name}}</h3><p>{{.Category}} içerik hattı</p>
+      <dl><div><dt>Alternatif</dt><dd>{{.VariantCount}}</dd></div><div><dt>Bildirim eşiği</dt><dd>{{.NotifyThreshold}} / 100</dd></div><div><dt>Instagram ID</dt><dd>{{maskID .InstagramUserID}}</dd></div></dl>
+      <footer>Son config senkronu {{formatTime .UpdatedAt}}</footer>
+    </article>
+  {{else}}<div class="empty-state panel">Tanımlı kanal bulunamadı.</div>{{end}}
+  </div>
+</section>
+{{end}}
+
+{{define "system-page"}}
+<section>
+  <div class="section-heading"><h2>Altyapı görünümü</h2><p>Gizli değerleri açmadan runtime ve worker yapılandırmasının özeti.</p></div>
+  <div class="system-grid">
+    <article class="panel health-card"><span class="health-icon {{if .System.DatabaseConnected}}ok{{else}}bad{{end}}"></span><div><p class="eyebrow">VERİTABANI</p><h3>{{if .System.DatabaseConnected}}Bağlantı hazır{{else}}Bağlantı yok{{end}}</h3><small>PostgreSQL · {{.System.Environment}}</small></div></article>
+    <article class="panel health-card"><span class="health-icon {{if .System.SchedulerEnabled}}ok{{else}}idle{{end}}"></span><div><p class="eyebrow">SCHEDULER</p><h3>{{if .System.SchedulerEnabled}}Çalışıyor{{else}}Devre dışı{{end}}</h3><small>İş döngüsü {{.System.WorkSeconds}} saniye</small></div></article>
+    <article class="panel health-card"><span class="health-icon {{if .System.PublishEnabled}}warn{{else}}idle{{end}}"></span><div><p class="eyebrow">INSTAGRAM</p><h3>{{if .System.PublishEnabled}}Gerçek yayın açık{{else}}Dry-run modu{{end}}</h3><small>{{if .System.PublishEnabled}}Dış yan etki etkin{{else}}Graph API’ye gönderim yapılmaz{{end}}</small></div></article>
+  </div>
+  <div class="dashboard-grid system-details">
+    <section class="panel"><div class="panel-head"><div><p class="eyebrow">WORKER ARALIKLARI</p><h3>Scheduler</h3></div></div><dl class="config-list"><div><dt>Haber senkronu</dt><dd>{{.System.NewsSyncMinutes}} dk</dd></div><div><dt>AI yeniden deneme</dt><dd>{{.System.AIRetryMinutes}} dk</dd></div><div><dt>Yayın worker’ı</dt><dd>{{.System.PublishMinutes}} dk</dd></div><div><dt>Bildirim worker’ı</dt><dd>{{.System.NotifySeconds}} sn</dd></div></dl></section>
+    <section class="panel"><div class="panel-head"><div><p class="eyebrow">SAĞLAYICILAR</p><h3>AI ve depolama</h3></div></div><dl class="config-list"><div><dt>tgpt</dt><dd>{{if .System.TgptEnabled}}Etkin{{else}}Kapalı{{end}}</dd></div><div><dt>Ollama</dt><dd>{{if .System.OllamaEnabled}}{{.System.OllamaModel}}{{else}}Kapalı{{end}}</dd></div><div><dt>Depolama</dt><dd>{{.System.StorageDriver}}</dd></div><div><dt>Medya saklama</dt><dd>{{.System.RetentionDays}} gün</dd></div></dl></section>
+    <section class="panel"><div class="panel-head"><div><p class="eyebrow">OUTBOX</p><h3>Telegram teslimatı</h3></div></div><div class="outbox-large"><div><strong>{{.System.OutboxPending}}</strong><span>Bekleyen</span></div><div><strong class="{{if gt .System.OutboxDead 0}}text-danger{{end}}">{{.System.OutboxDead}}</strong><span>Ölü mesaj</span></div></div></section>
+  </div>
+</section>
+{{end}}

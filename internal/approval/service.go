@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"ai-social-publisher/internal/account"
 	"ai-social-publisher/internal/ai"
@@ -401,6 +402,16 @@ func (s *Service) SelectVariant(ctx context.Context, variantID int64) error {
 }
 
 func (s *Service) SelectVariantForJob(ctx context.Context, jobID, variantID int64) error {
+	if err := s.SelectVariantForReview(ctx, jobID, variantID); err != nil {
+		return err
+	}
+	return s.QueuePublish(ctx, jobID)
+}
+
+// SelectVariantForReview selects a variant, renders its real artwork and leaves
+// the job waiting for an explicit web-console publish confirmation. Legacy API
+// and Telegram callers use SelectVariantForJob, which immediately queues it.
+func (s *Service) SelectVariantForReview(ctx context.Context, jobID, variantID int64) error {
 	variant, err := s.posts.GetVariantByID(ctx, variantID)
 	if err != nil {
 		return err
@@ -416,11 +427,71 @@ func (s *Service) SelectVariantForJob(ctx context.Context, jobID, variantID int6
 		(job.Status == post.StatusApproved || job.Status == post.StatusPublishing || job.Status == post.StatusPublished) {
 		return nil
 	}
-	return s.posts.SelectVariant(ctx, jobID, variantID)
+	if job.Status == post.StatusReadyToPublish {
+		if !job.SelectedVariantID.Valid || job.SelectedVariantID.Int64 != variantID {
+			if err := s.posts.ReselectVariant(ctx, jobID, variantID); err != nil {
+				return err
+			}
+		}
+	} else if err := s.posts.SelectVariant(ctx, jobID, variantID); err != nil {
+		return err
+	}
+	return s.PreparePreview(ctx, jobID)
 }
 
-// QueuePublish validates that the job has already been approved. APPROVED is
-// itself the durable publish queue state consumed by PublishApproved.
+// UpdateVariantCaption validates and saves an operator edit. If the edited
+// variant is selected, its real preview is regenerated before returning.
+func (s *Service) UpdateVariantCaption(ctx context.Context, jobID, variantID int64, caption string) error {
+	caption = strings.TrimSpace(caption)
+	if n := utf8.RuneCountInString(caption); n == 0 || n > 2200 {
+		return fmt.Errorf("caption must contain between 1 and 2200 characters")
+	}
+	selected, err := s.posts.UpdateVariantCaption(ctx, jobID, variantID, caption)
+	if err != nil {
+		return err
+	}
+	if selected {
+		return s.PreparePreview(ctx, jobID)
+	}
+	return nil
+}
+
+// PreparePreview renders and stores the selected variant without contacting
+// Instagram. It is safe to retry; a successful render replaces image_url.
+func (s *Service) PreparePreview(ctx context.Context, jobID int64) error {
+	for attempt := 0; attempt < 2; attempt++ {
+		job, candidate, acct, err := s.loadJobContext(ctx, jobID)
+		if err != nil {
+			return err
+		}
+		if !job.SelectedVariantID.Valid {
+			return fmt.Errorf("job %d has no selected variant", jobID)
+		}
+		variant, err := s.posts.GetVariantByID(ctx, job.SelectedVariantID.Int64)
+		if err != nil {
+			return err
+		}
+		rendered, err := s.renderer.RenderPostImage(ctx, *variant, toAINews(*candidate), *acct)
+		if err != nil {
+			return fmt.Errorf("render preview: %w", err)
+		}
+		uploaded, err := s.storage.Upload(ctx, rendered.LocalPath)
+		if err != nil {
+			return fmt.Errorf("store preview: %w", err)
+		}
+		saved, err := s.posts.SetVariantImageURLForCaption(ctx, variant.ID, variant.Caption, uploaded.PublicURL)
+		if err != nil {
+			return fmt.Errorf("save preview URL: %w", err)
+		}
+		if saved {
+			return nil
+		}
+	}
+	return errors.New("caption changed while preview was rendering; retry preview")
+}
+
+// QueuePublish moves a reviewed job into APPROVED, the durable queue consumed
+// by PublishApproved. Later states are accepted for idempotent callers.
 func (s *Service) QueuePublish(ctx context.Context, jobID int64) error {
 	job, err := s.posts.GetByID(ctx, jobID)
 	if err != nil {
@@ -428,6 +499,21 @@ func (s *Service) QueuePublish(ctx context.Context, jobID int64) error {
 	}
 	if job.Status == post.StatusApproved || job.Status == post.StatusPublishing || job.Status == post.StatusPublished {
 		return nil
+	}
+	if job.Status == post.StatusReadyToPublish {
+		if !job.SelectedVariantID.Valid {
+			return fmt.Errorf("job %d has no selected variant", jobID)
+		}
+		variant, err := s.posts.GetVariantByID(ctx, job.SelectedVariantID.Int64)
+		if err != nil {
+			return err
+		}
+		if strings.TrimSpace(variant.ImageURL) == "" {
+			if err := s.PreparePreview(ctx, jobID); err != nil {
+				return err
+			}
+		}
+		return s.posts.UpdateStatus(ctx, jobID, post.StatusApproved)
 	}
 	return fmt.Errorf("%w: %s is not publishable", post.ErrInvalidTransition, job.Status)
 }
@@ -473,25 +559,28 @@ func (s *Service) PublishJob(ctx context.Context, jobID int64) error {
 		return s.fail(ctx, jobID, fmt.Sprintf("load variant: %v", err))
 	}
 
-	// Render image.
-	rendered, err := s.renderer.RenderPostImage(ctx, *variant, toAINews(*candidate), *acct)
-	if err != nil {
-		return s.fail(ctx, jobID, fmt.Sprintf("render image: %v", err))
-	}
-
-	// Upload to obtain a public URL.
-	uploaded, err := s.storage.Upload(ctx, rendered.LocalPath)
-	if err != nil {
-		return s.fail(ctx, jobID, fmt.Sprintf("upload image: %v", err))
-	}
-	if err := s.posts.SetVariantImageURL(ctx, variant.ID, uploaded.PublicURL); err != nil {
-		s.logger.Warn("failed to persist variant image url", "error", err)
+	imageURL := strings.TrimSpace(variant.ImageURL)
+	if imageURL == "" {
+		// Compatibility fallback for jobs approved before preview preparation was
+		// introduced, or for callers that bypassed the web console.
+		rendered, err := s.renderer.RenderPostImage(ctx, *variant, toAINews(*candidate), *acct)
+		if err != nil {
+			return s.fail(ctx, jobID, fmt.Sprintf("render image: %v", err))
+		}
+		uploaded, err := s.storage.Upload(ctx, rendered.LocalPath)
+		if err != nil {
+			return s.fail(ctx, jobID, fmt.Sprintf("upload image: %v", err))
+		}
+		imageURL = uploaded.PublicURL
+		if err := s.posts.SetVariantImageURL(ctx, variant.ID, imageURL); err != nil {
+			s.logger.Warn("failed to persist variant image url", "error", err)
+		}
 	}
 
 	// Publish (dry-run aware).
 	result, pubErr := s.publisher.PublishImage(ctx, instagram.PublishRequest{
 		InstagramUserID: acct.InstagramUserID,
-		ImageURL:        uploaded.PublicURL,
+		ImageURL:        imageURL,
 		Caption:         variant.Caption,
 	})
 

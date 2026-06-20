@@ -13,6 +13,7 @@ const (
 	StatusVariantsQueued         Status = "VARIANTS_QUEUED"
 	StatusGeneratingVariants     Status = "GENERATING_VARIANTS"
 	StatusWaitingVariantApproval Status = "WAITING_VARIANT_APPROVAL"
+	StatusReadyToPublish         Status = "READY_TO_PUBLISH"
 	StatusApproved               Status = "APPROVED"
 	StatusPublishing             Status = "PUBLISHING"
 	StatusPublished              Status = "PUBLISHED"
@@ -31,7 +32,8 @@ var allowedTransitions = map[Status][]Status{
 	StatusWaitingFirstApproval:   {StatusVariantsQueued, StatusSkipped, StatusFailed},
 	StatusVariantsQueued:         {StatusGeneratingVariants, StatusSkipped, StatusFailed},
 	StatusGeneratingVariants:     {StatusWaitingVariantApproval, StatusWaitingAI, StatusFailed},
-	StatusWaitingVariantApproval: {StatusApproved, StatusVariantsQueued, StatusSkipped, StatusFailed},
+	StatusWaitingVariantApproval: {StatusReadyToPublish, StatusVariantsQueued, StatusSkipped, StatusFailed},
+	StatusReadyToPublish:         {StatusApproved, StatusVariantsQueued, StatusSkipped, StatusFailed},
 	StatusApproved:               {StatusPublishing, StatusFailed},
 	StatusPublishing:             {StatusPublished, StatusFailed},
 	// Terminal states.

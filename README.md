@@ -25,6 +25,7 @@ hazırlar ve Instagram Graph API ile yayınlar.
 - [Config örneği](#config-örneği)
 - [Instagram Graph API ayarları](#instagram-graph-api-ayarları)
 - [Telegram callback akışı](#telegram-callback-akışı)
+- [Yönetim paneli](#yönetim-paneli)
 - [Docker Compose kullanımı](#docker-compose-kullanımı)
 - [HTTP API ve örnek curl komutları](#http-api-ve-örnek-curl-komutları)
 - [Status flow](#status-flow)
@@ -353,6 +354,32 @@ ve allowlist dışında kalan `user` değerleri reddedilir.
 
 ---
 
+## Yönetim paneli
+
+Uygulama, ayrı bir Node.js servisine ihtiyaç duymayan gömülü bir operasyon
+paneli içerir. Tarayıcıdan `http://localhost:8080/login` adresini açıp
+`API_AUTH_TOKEN` değeriyle giriş yapın. Token tarayıcıda saklanmaz; başarılı
+girişten sonra sekiz saatlik, `HttpOnly` ve `SameSite=Strict` bir oturum cookie'si
+kullanılır.
+
+Panelde aşağıdaki ekranlar bulunur:
+
+- **Yayın Masası:** durum özeti, onay bekleyen işler ve bildirim outbox'ı.
+- **Post Kuyruğu:** durum, kategori, kanal ve metin filtreleri.
+- **Post Detayı:** AI skoru, caption düzenleme, varyant seçimi ve gerçek PNG önizlemesi.
+- **Haber Adayları, Kanallar ve Sistem:** salt okunur operasyon görünümleri.
+
+Panelde varyant seçimi işi `READY_TO_PUBLISH` durumunda tutar. Görsel bu aşamada
+gerçek renderer ile hazırlanır; operatör caption ve görseli gördükten sonra ayrı
+bir **Onayla ve yayınla** aksiyonuyla işi `APPROVED` yayın kuyruğuna alır. Mevcut
+Telegram ve JSON API onayları geriye uyumluluk için bu iki adımı tek işlemde
+tamamlamaya devam eder.
+
+HTMX ve panel varlıkları binary içine gömülüdür; çalışma zamanında CDN çağrısı
+yapılmaz.
+
+---
+
 ## Docker Compose kullanımı
 
 PostgreSQL + uygulama birlikte:
@@ -440,10 +467,15 @@ NEW
                       └─▶ WAITING_VARIANT_APPROVAL  (dinamik butonlar)
                              ├─▶ SKIPPED              ("İptal")
                              ├─▶ VARIANTS_QUEUED      ("Yeniden Üret")
-                             └─▶ APPROVED             (alternatif seçildi)
-                                    └─▶ PUBLISHING ─▶ PUBLISHED
-                                                   └─▶ FAILED
+                             └─▶ READY_TO_PUBLISH      (panel seçimi + gerçek önizleme)
+                                    ├─▶ VARIANTS_QUEUED / SKIPPED
+                                    └─▶ APPROVED       (açık yayın onayı)
+                                           └─▶ PUBLISHING ─▶ PUBLISHED
+                                                          └─▶ FAILED
 ```
+
+Telegram ve `/api/posts/{id}/approve` geriye uyumluluk için
+`READY_TO_PUBLISH → APPROVED` geçişini aynı istek içinde tamamlar.
 
 Terminal durumlar: `PUBLISHED`, `SKIPPED`, `FAILED`.
 

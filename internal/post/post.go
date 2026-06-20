@@ -284,14 +284,14 @@ WHERE id = $5`, StatusWaitingAI, aiError, retries, time.Now().Add(delay), id)
 func (r *Repository) QueueVariants(ctx context.Context, id int64, count int) error {
 	return r.transition(ctx, id, StatusVariantsQueued, func(tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx,
-			`UPDATE post_jobs SET requested_variant_count = $1 WHERE id = $2`, count, id)
+			`UPDATE post_jobs SET requested_variant_count = $1, selected_variant_id = NULL WHERE id = $2`, count, id)
 		return err
 	})
 }
 
-// SelectVariant records the chosen variant and moves to APPROVED.
+// SelectVariant records the chosen variant and moves to READY_TO_PUBLISH.
 func (r *Repository) SelectVariant(ctx context.Context, id, variantID int64) error {
-	return r.transition(ctx, id, StatusApproved, func(tx *sql.Tx) error {
+	return r.transition(ctx, id, StatusReadyToPublish, func(tx *sql.Tx) error {
 		result, err := tx.ExecContext(ctx,
 			`UPDATE post_jobs SET selected_variant_id = $1
 			 WHERE id = $2 AND EXISTS (
@@ -309,6 +309,75 @@ func (r *Repository) SelectVariant(ctx context.Context, id, variantID int64) err
 		}
 		return nil
 	})
+}
+
+// ReselectVariant changes the selected variant while a job is still under
+// operator review. It deliberately does not accept later publish states.
+func (r *Repository) ReselectVariant(ctx context.Context, id, variantID int64) error {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	var current Status
+	if err := tx.QueryRowContext(ctx, `SELECT status FROM post_jobs WHERE id = $1 FOR UPDATE`, id).Scan(&current); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrNotFound
+		}
+		return err
+	}
+	if current != StatusReadyToPublish {
+		return fmt.Errorf("%w: cannot reselect variant in %s", ErrInvalidTransition, current)
+	}
+	result, err := tx.ExecContext(ctx, `UPDATE post_jobs SET selected_variant_id = $1, updated_at = now()
+WHERE id = $2 AND EXISTS (SELECT 1 FROM post_variants WHERE id = $1 AND post_job_id = $2)`, variantID, id)
+	if err != nil {
+		return err
+	}
+	if n, err := result.RowsAffected(); err != nil {
+		return err
+	} else if n != 1 {
+		return fmt.Errorf("%w: variant does not belong to job", ErrNotFound)
+	}
+	return tx.Commit()
+}
+
+// UpdateVariantCaption edits a variant only while an operator can still review
+// it. The preview URL is cleared in the same transaction so stale artwork is
+// never presented after a caption change. The bool reports whether the edited
+// variant is currently selected and therefore needs a new preview.
+func (r *Repository) UpdateVariantCaption(ctx context.Context, jobID, variantID int64, caption string) (bool, error) {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	var current Status
+	var selected sql.NullInt64
+	if err := tx.QueryRowContext(ctx, `SELECT status, selected_variant_id FROM post_jobs WHERE id = $1 FOR UPDATE`, jobID).Scan(&current, &selected); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return false, ErrNotFound
+		}
+		return false, err
+	}
+	if current != StatusWaitingVariantApproval && current != StatusReadyToPublish {
+		return false, fmt.Errorf("%w: caption cannot be edited in %s", ErrInvalidTransition, current)
+	}
+	result, err := tx.ExecContext(ctx, `UPDATE post_variants SET caption = $1, image_url = '' WHERE id = $2 AND post_job_id = $3`, caption, variantID, jobID)
+	if err != nil {
+		return false, err
+	}
+	if n, err := result.RowsAffected(); err != nil {
+		return false, err
+	} else if n != 1 {
+		return false, ErrNotFound
+	}
+	if err := tx.Commit(); err != nil {
+		return false, err
+	}
+	return selected.Valid && selected.Int64 == variantID, nil
 }
 
 // ListStaleProcessing returns jobs left in an in-progress state beyond cutoff.
@@ -461,6 +530,18 @@ FROM post_variants WHERE id = $1`
 func (r *Repository) SetVariantImageURL(ctx context.Context, variantID int64, url string) error {
 	_, err := r.db.ExecContext(ctx, `UPDATE post_variants SET image_url = $1 WHERE id = $2`, url, variantID)
 	return err
+}
+
+// SetVariantImageURLForCaption stores a preview only if the caption used to
+// render it is still current. This prevents a slower concurrent render from
+// restoring stale artwork after an operator edit.
+func (r *Repository) SetVariantImageURLForCaption(ctx context.Context, variantID int64, caption, url string) (bool, error) {
+	result, err := r.db.ExecContext(ctx, `UPDATE post_variants SET image_url = $1 WHERE id = $2 AND caption = $3`, url, variantID, caption)
+	if err != nil {
+		return false, err
+	}
+	n, err := result.RowsAffected()
+	return n == 1, err
 }
 
 // ---- publish logs ----

@@ -162,8 +162,30 @@ func TestDurableApprovalWorkflow(t *testing.T) {
 	if err := service.DeliverNotifications(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if err := service.SelectVariantForJob(ctx, job.ID, variants[0].ID); err != nil {
+	if err := service.SelectVariantForReview(ctx, job.ID, variants[0].ID); err != nil {
 		t.Fatal(err)
+	}
+	ready, err := postRepo.GetByID(ctx, job.ID)
+	if err != nil || ready.Status != post.StatusReadyToPublish {
+		t.Fatalf("expected ready to publish, job=%+v err=%v", ready, err)
+	}
+	preview, err := postRepo.GetVariantByID(ctx, variants[0].ID)
+	if err != nil || preview.ImageURL == "" {
+		t.Fatalf("expected real preview URL, variant=%+v err=%v", preview, err)
+	}
+	if err := service.UpdateVariantCaption(ctx, job.ID, variants[0].ID, "  edited caption  "); err != nil {
+		t.Fatal(err)
+	}
+	edited, err := postRepo.GetVariantByID(ctx, variants[0].ID)
+	if err != nil || edited.Caption != "edited caption" || edited.ImageURL == "" {
+		t.Fatalf("expected edited caption and regenerated preview, variant=%+v err=%v", edited, err)
+	}
+	if err := service.QueuePublish(ctx, job.ID); err != nil {
+		t.Fatal(err)
+	}
+	approved, err := postRepo.GetByID(ctx, job.ID)
+	if err != nil || approved.Status != post.StatusApproved {
+		t.Fatalf("expected approved publish queue state, job=%+v err=%v", approved, err)
 	}
 	if err := service.PublishApproved(ctx); err != nil {
 		t.Fatal(err)

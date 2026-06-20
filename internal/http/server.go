@@ -44,6 +44,8 @@ type Deps struct {
 	Logger   *slog.Logger
 	DB       *sql.DB
 	Outbox   *outbox.Repository
+	// Admin is the embedded operator console mounted at the root.
+	Admin http.Handler
 	// StaticDir is served at /static so rendered media has a public URL.
 	StaticDir string
 }
@@ -102,6 +104,9 @@ func NewServer(d Deps) *http.Server {
 	if d.StaticDir != "" {
 		fs := http.StripPrefix("/static/", http.FileServer(http.Dir(d.StaticDir)))
 		r.Handle("/static/*", fs)
+	}
+	if d.Admin != nil {
+		r.Mount("/", d.Admin)
 	}
 
 	return &http.Server{

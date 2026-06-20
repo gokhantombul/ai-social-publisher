@@ -15,7 +15,9 @@ func TestCanTransition(t *testing.T) {
 		{StatusWaitingFirstApproval, StatusVariantsQueued, true},
 		{StatusVariantsQueued, StatusGeneratingVariants, true},
 		{StatusGeneratingVariants, StatusWaitingVariantApproval, true},
-		{StatusWaitingVariantApproval, StatusApproved, true},
+		{StatusWaitingVariantApproval, StatusReadyToPublish, true},
+		{StatusReadyToPublish, StatusApproved, true},
+		{StatusWaitingVariantApproval, StatusApproved, false},
 		{StatusApproved, StatusPublishing, true},
 		{StatusPublishing, StatusPublished, true},
 		// Disallowed jumps.
