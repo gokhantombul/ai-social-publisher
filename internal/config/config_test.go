@@ -3,6 +3,8 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"regexp"
+	"strings"
 	"testing"
 )
 
@@ -141,5 +143,21 @@ unknown_section: true
 	t.Setenv("MISSING_DATABASE_URL", "postgres://localhost/test")
 	if _, err := Load(path); err == nil {
 		t.Fatal("expected unknown YAML field error")
+	}
+}
+
+func TestExampleConfigOnlyReferencesDocumentedEnvironmentVariables(t *testing.T) {
+	configRaw, err := os.ReadFile("../../config.example.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	envRaw, err := os.ReadFile("../../.env.example")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, match := range regexp.MustCompile(`\$\{([A-Z][A-Z0-9_]*)\}`).FindAllStringSubmatch(string(configRaw), -1) {
+		if !strings.Contains("\n"+string(envRaw), "\n"+match[1]+"=") {
+			t.Errorf("config.example.yaml references undocumented environment variable %q", match[1])
+		}
 	}
 }

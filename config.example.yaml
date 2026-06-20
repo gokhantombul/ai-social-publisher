@@ -1,6 +1,6 @@
 # ai-social-publisher example configuration.
-# Copy to config.yaml and adjust. ${VAR} placeholders are expanded from the
-# environment at load time (see .env.example).
+# Copy to config.yaml and adjust. Environment placeholders in this file are
+# expanded at load time (see .env.example).
 
 app:
   env: "${APP_ENV}"
