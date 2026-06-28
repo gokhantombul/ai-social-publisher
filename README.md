@@ -206,20 +206,25 @@ go mod download
 cp .env.example .env
 cp config.example.yaml config.yaml   # gerekirse düzenleyin
 
-# 3) ortam değişkenlerini yükle (veya export edin)
-set -a && source .env && set +a
+# 3) development PostgreSQL'i başlat
+make db-up
 
-# 4) çalıştır (auto_migrate=true ise migration otomatik uygulanır)
-make run
+# 4) development ortamında çalıştır (auto_migrate=true ise migration otomatik uygulanır)
+# Uygulama .env dosyasını başlangıçta otomatik yükler.
+make run dev
+
+# farklı config dosyasıyla çalıştırmak için
+make run dev CONFIG=config.example.yaml
+
 # veya
-go run ./cmd/server serve --config config.yaml
+APP_ENV=development go run ./cmd/server serve --config config.yaml
 ```
 
 Migration'ı elle uygulamak için:
 
 ```bash
-go run ./cmd/server migrate up      # tüm migration'ları uygula
-go run ./cmd/server migrate down    # son migration'ı geri al
+APP_ENV=development go run ./cmd/server migrate up      # tüm migration'ları uygula
+APP_ENV=development go run ./cmd/server migrate down    # son migration'ı geri al
 ```
 
 ---
@@ -229,16 +234,23 @@ go run ./cmd/server migrate down    # son migration'ı geri al
 Sadece veritabanını Docker ile ayağa kaldırmak için:
 
 ```bash
-docker run -d --name aisp-postgres \
-  -e POSTGRES_USER=aisp -e POSTGRES_PASSWORD=aisp_secret -e POSTGRES_DB=ai_social_publisher \
-  -p 5432:5432 postgres:16-alpine
+make db-up
 ```
 
 DSN örneği (`.env` içindeki `DATABASE_URL`):
 
 ```
-postgres://aisp:aisp_secret@localhost:5432/ai_social_publisher?sslmode=disable
+postgres://aisp:aisp_secret@localhost:5433/ai_social_publisher?sslmode=disable
 ```
+
+Varsayılan development portu `5433`'tür. Böylece makinede 5432 kullanan başka
+PostgreSQL servisleriyle çakışmaz. Farklı port gerekiyorsa `.env` içinde
+`POSTGRES_PORT` ve `DATABASE_URL` değerlerini birlikte değiştirin.
+
+`password authentication failed for user "aisp"` hatası alırsanız hedef portta
+eski parola ile oluşturulmuş bir PostgreSQL çalışıyordur. Bu durumda mevcut DB
+parolasını `.env` içindeki `DATABASE_URL` ile eşitleyin veya development
+veritabanı volume'unu sıfırlayıp `make db-up` ile yeniden oluşturun.
 
 Migration'lar `migrations/*.sql` içinde **goose** formatındadır ve uygulamaya
 gömülüdür (`embed.FS`); `database.auto_migrate: true` ile açılışta uygulanır.

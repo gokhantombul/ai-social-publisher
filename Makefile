@@ -1,7 +1,13 @@
-.PHONY: help build run test test-race fmt fmt-check tidy vet vuln lint ci docker-up docker-down migrate-up migrate-down
+.PHONY: help build run dev test test-race fmt fmt-check tidy vet vuln lint ci db-up db-down docker-up docker-down migrate-up migrate-down
 
 BINARY := bin/ai-social-publisher
 PKG := ./...
+CONFIG ?= config.yaml
+APP_ENV ?= development
+
+ifneq ($(filter dev,$(MAKECMDGOALS)),)
+APP_ENV := development
+endif
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-18s\033[0m %s\n", $$1, $$2}'
@@ -9,8 +15,11 @@ help: ## Show this help
 build: ## Build the server binary
 	go build -o $(BINARY) ./cmd/server
 
-run: ## Run the server (uses config.yaml + .env)
-	go run ./cmd/server
+run: ## Run the server (uses CONFIG=config.yaml + .env)
+	APP_ENV=$(APP_ENV) go run ./cmd/server serve --config $(CONFIG)
+
+dev: ## Select development environment (use: make run dev)
+	@:
 
 test: ## Run unit tests
 	go test $(PKG) -count=1
@@ -36,6 +45,12 @@ vuln: ## Scan reachable code for known vulnerabilities
 lint: fmt-check vet ## Run static checks
 
 ci: lint test-race build ## Run the local CI subset
+
+db-up: ## Start only the development postgres container
+	docker compose up -d postgres
+
+db-down: ## Stop the development postgres container
+	docker compose stop postgres
 
 docker-up: ## Start docker compose stack (postgres + app)
 	docker compose up --build -d
