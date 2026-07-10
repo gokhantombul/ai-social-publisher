@@ -95,6 +95,8 @@ func NewServer(d Deps) *http.Server {
 			r.Post("/posts/{id}/approve", h.approvePost)
 			r.Post("/posts/{id}/reject", h.rejectPost)
 			r.Post("/posts/{id}/publish", h.publishPost)
+			r.Post("/posts/{id}/schedule", h.schedulePost)
+			r.Post("/posts/{id}/unschedule", h.unschedulePost)
 
 			r.Get("/analytics/posts", h.analyticsPosts)
 		})

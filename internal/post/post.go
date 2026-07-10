@@ -35,6 +35,9 @@ type Job struct {
 	NextAIRetryAt         time.Time     `json:"nextAiRetryAt"`
 	CreatedAt             time.Time     `json:"createdAt"`
 	UpdatedAt             time.Time     `json:"updatedAt"`
+	// ScheduledPublishAt is set only while a job is SCHEDULED for deferred
+	// publishing; nil for immediate or unscheduled jobs.
+	ScheduledPublishAt *time.Time `json:"scheduledPublishAt,omitempty"`
 }
 
 // Variant mirrors the post_variants table.
@@ -57,6 +60,12 @@ func NewRepository(db *sql.DB) *Repository {
 	return &Repository{db: db}
 }
 
+// jobColumns is the canonical column list for post_jobs, kept in one place so
+// every query that feeds scanJob stays in sync. scheduled_publish_at is last.
+const jobColumns = `id, news_candidate_id, social_account_id, status, requested_variant_count,
+	selected_variant_id, instagram_media_id, ai_provider, ai_model, ai_error,
+	error_message, ai_retry_count, next_ai_retry_at, created_at, updated_at, scheduled_publish_at`
+
 // GetOrCreate returns the existing job for a (candidate, account) pair or creates
 // a new one in StatusNew. The second return reports whether it was created.
 func (r *Repository) GetOrCreate(ctx context.Context, newsCandidateID, socialAccountID int64) (*Job, bool, error) {
@@ -64,9 +73,7 @@ func (r *Repository) GetOrCreate(ctx context.Context, newsCandidateID, socialAcc
 INSERT INTO post_jobs (news_candidate_id, social_account_id, status)
 VALUES ($1, $2, $3)
 ON CONFLICT (news_candidate_id, social_account_id) DO NOTHING
-RETURNING id, news_candidate_id, social_account_id, status, requested_variant_count,
-          selected_variant_id, instagram_media_id, ai_provider, ai_model, ai_error,
-          error_message, ai_retry_count, next_ai_retry_at, created_at, updated_at`
+RETURNING ` + jobColumns
 
 	job, err := scanJob(r.db.QueryRowContext(ctx, insert, newsCandidateID, socialAccountID, StatusNew))
 	if errors.Is(err, sql.ErrNoRows) {
@@ -87,10 +94,7 @@ func (r *Repository) GetByID(ctx context.Context, id int64) (*Job, error) {
 }
 
 func (r *Repository) getBy(ctx context.Context, where string, args ...any) (*Job, error) {
-	q := `SELECT id, news_candidate_id, social_account_id, status, requested_variant_count,
-       selected_variant_id, instagram_media_id, ai_provider, ai_model, ai_error,
-	       error_message, ai_retry_count, next_ai_retry_at, created_at, updated_at
-FROM post_jobs WHERE ` + where + ` LIMIT 1`
+	q := `SELECT ` + jobColumns + ` FROM post_jobs WHERE ` + where + ` LIMIT 1`
 	job, err := scanJob(r.db.QueryRowContext(ctx, q, args...))
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
@@ -105,10 +109,7 @@ func (r *Repository) List(ctx context.Context, limit int) ([]Job, error) {
 	if limit <= 0 || limit > 200 {
 		limit = 50
 	}
-	const q = `SELECT id, news_candidate_id, social_account_id, status, requested_variant_count,
-       selected_variant_id, instagram_media_id, ai_provider, ai_model, ai_error,
-	       error_message, ai_retry_count, next_ai_retry_at, created_at, updated_at
-FROM post_jobs ORDER BY id DESC LIMIT $1`
+	q := `SELECT ` + jobColumns + ` FROM post_jobs ORDER BY id DESC LIMIT $1`
 	rows, err := r.db.QueryContext(ctx, q, limit)
 	if err != nil {
 		return nil, err
@@ -130,9 +131,7 @@ func (r *Repository) ListByStatus(ctx context.Context, status Status, limit int)
 	if limit <= 0 || limit > 200 {
 		limit = 50
 	}
-	const q = `SELECT id, news_candidate_id, social_account_id, status, requested_variant_count,
-       selected_variant_id, instagram_media_id, ai_provider, ai_model, ai_error,
-	       error_message, ai_retry_count, next_ai_retry_at, created_at, updated_at
+	q := `SELECT ` + jobColumns + `
 	FROM post_jobs WHERE status = $1 AND next_ai_retry_at <= now() ORDER BY updated_at ASC LIMIT $2`
 	rows, err := r.db.QueryContext(ctx, q, status, limit)
 	if err != nil {
@@ -154,10 +153,7 @@ func (r *Repository) ListRecentByStatus(ctx context.Context, status Status, limi
 	if limit <= 0 || limit > 200 {
 		limit = 50
 	}
-	const q = `SELECT id, news_candidate_id, social_account_id, status, requested_variant_count,
-       selected_variant_id, instagram_media_id, ai_provider, ai_model, ai_error,
-       error_message, ai_retry_count, next_ai_retry_at, created_at, updated_at
-FROM post_jobs WHERE status = $1 ORDER BY updated_at DESC LIMIT $2`
+	q := `SELECT ` + jobColumns + ` FROM post_jobs WHERE status = $1 ORDER BY updated_at DESC LIMIT $2`
 	rows, err := r.db.QueryContext(ctx, q, status, limit)
 	if err != nil {
 		return nil, err
@@ -385,9 +381,7 @@ func (r *Repository) ListStaleProcessing(ctx context.Context, cutoff time.Time, 
 	if limit <= 0 || limit > 200 {
 		limit = 50
 	}
-	const q = `SELECT id, news_candidate_id, social_account_id, status, requested_variant_count,
-       selected_variant_id, instagram_media_id, ai_provider, ai_model, ai_error,
-	       error_message, ai_retry_count, next_ai_retry_at, created_at, updated_at
+	q := `SELECT ` + jobColumns + `
 FROM post_jobs
 WHERE status IN ($1, $2, $3) AND updated_at < $4
 ORDER BY updated_at ASC LIMIT $5`
@@ -422,6 +416,129 @@ func (r *Repository) MarkFailed(ctx context.Context, id int64, msg string) error
 		_, err := tx.ExecContext(ctx, `UPDATE post_jobs SET error_message = $1 WHERE id = $2`, msg, id)
 		return err
 	})
+}
+
+// ---- scheduled publishing ----
+
+// Schedule moves a reviewed job (READY_TO_PUBLISH) to SCHEDULED with a future
+// publish time. Status and time are written in a single statement because the
+// chk_post_jobs_scheduled_at constraint cannot be deferred. The job must already
+// have a selected variant.
+func (r *Repository) Schedule(ctx context.Context, id int64, at time.Time) error {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	var current Status
+	var selected sql.NullInt64
+	if err := tx.QueryRowContext(ctx, `SELECT status, selected_variant_id FROM post_jobs WHERE id = $1 FOR UPDATE`, id).Scan(&current, &selected); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrNotFound
+		}
+		return err
+	}
+	if !CanTransition(current, StatusScheduled) {
+		return fmt.Errorf("%w: %s -> %s", ErrInvalidTransition, current, StatusScheduled)
+	}
+	if !selected.Valid {
+		return fmt.Errorf("%w: job has no selected variant", ErrNotFound)
+	}
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE post_jobs SET status = $1, scheduled_publish_at = $2, updated_at = now() WHERE id = $3`,
+		StatusScheduled, at, id); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// Reschedule changes the target time of an already SCHEDULED job without a status
+// transition, so the operator can move a planned publish earlier or later.
+func (r *Repository) Reschedule(ctx context.Context, id int64, at time.Time) error {
+	result, err := r.db.ExecContext(ctx,
+		`UPDATE post_jobs SET scheduled_publish_at = $1, updated_at = now() WHERE id = $2 AND status = $3`,
+		at, id, StatusScheduled)
+	if err != nil {
+		return err
+	}
+	n, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n != 1 {
+		return fmt.Errorf("%w: only a scheduled job can be rescheduled", ErrInvalidTransition)
+	}
+	return nil
+}
+
+// CancelSchedule returns a SCHEDULED job to READY_TO_PUBLISH and clears the time.
+func (r *Repository) CancelSchedule(ctx context.Context, id int64) error {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	var current Status
+	if err := tx.QueryRowContext(ctx, `SELECT status FROM post_jobs WHERE id = $1 FOR UPDATE`, id).Scan(&current); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrNotFound
+		}
+		return err
+	}
+	if current != StatusScheduled {
+		return fmt.Errorf("%w: cannot cancel schedule in %s", ErrInvalidTransition, current)
+	}
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE post_jobs SET status = $1, scheduled_publish_at = NULL, updated_at = now() WHERE id = $2`,
+		StatusReadyToPublish, id); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// ClaimScheduledDue atomically promotes a due SCHEDULED job to APPROVED so the
+// publish worker can send it. The bool is false when the schedule is not yet due
+// or another worker already claimed it. The scheduled time is kept for audit.
+func (r *Repository) ClaimScheduledDue(ctx context.Context, id int64, now time.Time) (bool, error) {
+	if !CanTransition(StatusScheduled, StatusApproved) {
+		return false, fmt.Errorf("%w: %s -> %s", ErrInvalidTransition, StatusScheduled, StatusApproved)
+	}
+	result, err := r.db.ExecContext(ctx,
+		`UPDATE post_jobs SET status = $1, updated_at = now()
+		 WHERE id = $2 AND status = $3 AND scheduled_publish_at IS NOT NULL AND scheduled_publish_at <= $4`,
+		StatusApproved, id, StatusScheduled, now)
+	if err != nil {
+		return false, err
+	}
+	n, err := result.RowsAffected()
+	return n == 1, err
+}
+
+// ListDueScheduled returns SCHEDULED jobs whose publish time has arrived.
+func (r *Repository) ListDueScheduled(ctx context.Context, now time.Time, limit int) ([]Job, error) {
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+	q := `SELECT ` + jobColumns + `
+FROM post_jobs
+WHERE status = $1 AND scheduled_publish_at <= $2
+ORDER BY scheduled_publish_at ASC LIMIT $3`
+	rows, err := r.db.QueryContext(ctx, q, StatusScheduled, now, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Job
+	for rows.Next() {
+		j, err := scanJob(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, j)
+	}
+	return out, rows.Err()
 }
 
 // transition runs a guarded status change plus an extra mutation in one tx.
@@ -629,10 +746,15 @@ func nullableJSON(b json.RawMessage) any {
 
 func scanJob(s interface{ Scan(...any) error }) (Job, error) {
 	var j Job
+	var scheduled sql.NullTime
 	err := s.Scan(
 		&j.ID, &j.NewsCandidateID, &j.SocialAccountID, &j.Status, &j.RequestedVariantCount,
 		&j.SelectedVariantID, &j.InstagramMediaID, &j.AIProvider, &j.AIModel, &j.AIError,
-		&j.ErrorMessage, &j.AIRetryCount, &j.NextAIRetryAt, &j.CreatedAt, &j.UpdatedAt,
+		&j.ErrorMessage, &j.AIRetryCount, &j.NextAIRetryAt, &j.CreatedAt, &j.UpdatedAt, &scheduled,
 	)
+	if scheduled.Valid {
+		t := scheduled.Time
+		j.ScheduledPublishAt = &t
+	}
 	return j, err
 }

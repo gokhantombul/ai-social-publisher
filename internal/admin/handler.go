@@ -73,6 +73,7 @@ func New(d Deps) (*Handler, error) {
 		"add":         func(a, b int) int { return a + b },
 		"sub":         func(a, b int) int { return a - b },
 		"eqStatus":    func(a post.Status, b string) bool { return string(a) == b },
+		"nowInput":    func() string { return time.Now().Format("2006-01-02T15:04") },
 	}).ParseFS(uiFS, "templates/*.html")
 	if err != nil {
 		return nil, fmt.Errorf("parse admin templates: %w", err)
@@ -115,6 +116,8 @@ func (h *Handler) routes() http.Handler {
 		r.With(h.requireCSRF).Post("/admin/posts/{id}/select", h.selectVariant)
 		r.With(h.requireCSRF).Post("/admin/posts/{id}/variants/{variantID}/caption", h.updateCaption)
 		r.With(h.requireCSRF).Post("/admin/posts/{id}/publish", h.publish)
+		r.With(h.requireCSRF).Post("/admin/posts/{id}/schedule", h.schedule)
+		r.With(h.requireCSRF).Post("/admin/posts/{id}/unschedule", h.unschedule)
 		r.With(h.requireCSRF).Post("/admin/posts/{id}/skip", h.skip)
 	})
 	return r
@@ -180,6 +183,8 @@ type JobDetailData struct {
 	CanRegenerate bool
 	CanSkip       bool
 	CanPublish    bool
+	CanSchedule   bool
+	IsScheduled   bool
 	IsActive      bool
 }
 
@@ -372,6 +377,8 @@ func (h *Handler) loadJobDetail(r *http.Request, id int64) (JobDetailData, error
 	d.CanRegenerate = d.CanEdit
 	d.CanSkip = job.Status == post.StatusWaitingFirstApproval || d.CanEdit
 	d.CanPublish = job.Status == post.StatusReadyToPublish && d.Selected != nil
+	d.CanSchedule = d.CanPublish
+	d.IsScheduled = job.Status == post.StatusScheduled
 	d.IsActive = job.Status == post.StatusScoringQueued || job.Status == post.StatusScoring || job.Status == post.StatusVariantsQueued || job.Status == post.StatusGeneratingVariants || job.Status == post.StatusApproved || job.Status == post.StatusPublishing
 	return d, nil
 }
@@ -467,6 +474,36 @@ func (h *Handler) updateCaption(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) publish(w http.ResponseWriter, r *http.Request) {
 	h.jobAction(w, r, func(id int64) error { return h.approval.QueuePublish(r.Context(), id) }, "Yayın Instagram kuyruğuna alındı.")
+}
+
+func (h *Handler) schedule(w http.ResponseWriter, r *http.Request) {
+	at, err := parseAdminScheduleTime(r.Form.Get("scheduledAt"))
+	if err != nil {
+		h.jobActionError(w, r, err)
+		return
+	}
+	h.jobAction(w, r, func(id int64) error { return h.approval.SchedulePublish(r.Context(), id, at) },
+		fmt.Sprintf("Yayın %s için zamanlandı.", at.Format("02.01.2006 15:04")))
+}
+
+func (h *Handler) unschedule(w http.ResponseWriter, r *http.Request) {
+	h.jobAction(w, r, func(id int64) error { return h.approval.CancelScheduledPublish(r.Context(), id) },
+		"Zamanlama iptal edildi; iş yayına hazır durumda.")
+}
+
+// parseAdminScheduleTime reads an HTML datetime-local value (no timezone) and
+// interprets it in the server's local timezone, which is what the operator sees.
+func parseAdminScheduleTime(raw string) (time.Time, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return time.Time{}, errors.New("bir yayın tarihi ve saati seçin")
+	}
+	for _, layout := range []string{"2006-01-02T15:04", "2006-01-02T15:04:05"} {
+		if t, err := time.ParseInLocation(layout, raw, time.Local); err == nil {
+			return t, nil
+		}
+	}
+	return time.Time{}, errors.New("geçersiz tarih/saat biçimi")
 }
 
 func (h *Handler) skip(w http.ResponseWriter, r *http.Request) {
@@ -588,7 +625,8 @@ func statusOptions() []StatusOption {
 		post.StatusNew, post.StatusScoringQueued, post.StatusScoring, post.StatusWaitingAI,
 		post.StatusScored, post.StatusWaitingFirstApproval, post.StatusVariantsQueued,
 		post.StatusGeneratingVariants, post.StatusWaitingVariantApproval, post.StatusReadyToPublish,
-		post.StatusApproved, post.StatusPublishing, post.StatusPublished, post.StatusSkipped, post.StatusFailed,
+		post.StatusScheduled, post.StatusApproved, post.StatusPublishing, post.StatusPublished,
+		post.StatusSkipped, post.StatusFailed,
 	}
 	out := make([]StatusOption, 0, len(statuses))
 	for _, status := range statuses {
@@ -603,7 +641,8 @@ func statusLabel(status post.Status) string {
 		post.StatusWaitingAI: "AI bekleniyor", post.StatusScored: "Skorlandı", post.StatusWaitingFirstApproval: "İlk onay bekliyor",
 		post.StatusVariantsQueued: "Alternatif kuyruğunda", post.StatusGeneratingVariants: "Alternatif üretiliyor",
 		post.StatusWaitingVariantApproval: "Varyant onayı bekliyor", post.StatusReadyToPublish: "Yayına hazır",
-		post.StatusApproved: "Yayın kuyruğunda", post.StatusPublishing: "Yayınlanıyor", post.StatusPublished: "Yayınlandı",
+		post.StatusScheduled: "Zamanlandı",
+		post.StatusApproved:  "Yayın kuyruğunda", post.StatusPublishing: "Yayınlanıyor", post.StatusPublished: "Yayınlandı",
 		post.StatusSkipped: "Atlandı", post.StatusFailed: "Başarısız",
 	}
 	if label := labels[status]; label != "" {
@@ -618,7 +657,7 @@ func statusClass(status post.Status) string {
 		return "success"
 	case post.StatusFailed:
 		return "danger"
-	case post.StatusWaitingFirstApproval, post.StatusWaitingVariantApproval, post.StatusReadyToPublish:
+	case post.StatusWaitingFirstApproval, post.StatusWaitingVariantApproval, post.StatusReadyToPublish, post.StatusScheduled:
 		return "attention"
 	case post.StatusSkipped:
 		return "muted"

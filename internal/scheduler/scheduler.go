@@ -90,6 +90,11 @@ func (s *Scheduler) Start(ctx context.Context) {
 	})
 
 	s.run(ctx, "publish-approved", time.Duration(s.cfg.PublishIntervalMinutes)*time.Minute, false, func(ctx context.Context) {
+		// Promote any scheduled jobs whose publish time has arrived, then flush
+		// the approved queue (which now includes those just promoted).
+		if err := s.approval.ProcessScheduledPublishes(ctx); err != nil {
+			s.logger.Error("scheduled publish error", "error", err)
+		}
 		if err := s.approval.PublishApproved(ctx); err != nil {
 			s.logger.Error("publish-approved error", "error", err)
 		}

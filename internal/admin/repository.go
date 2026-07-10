@@ -34,6 +34,7 @@ type JobView struct {
 	NextAIRetryAt         time.Time
 	CreatedAt             time.Time
 	UpdatedAt             time.Time
+	ScheduledPublishAt    sql.NullTime
 	Title                 string
 	Summary               string
 	Source                string
@@ -81,6 +82,7 @@ const jobSelect = `
 SELECT j.id, j.news_candidate_id, j.social_account_id, j.status, j.requested_variant_count,
        j.selected_variant_id, j.instagram_media_id, j.ai_provider, j.ai_model, j.ai_error,
        j.error_message, j.ai_retry_count, j.next_ai_retry_at, j.created_at, j.updated_at,
+       j.scheduled_publish_at,
        c.title, c.summary, c.source, c.source_url, c.category, c.published_at,
        a.code, a.name, a.instagram_user_id, a.variant_count, a.notify_threshold, a.is_active,
        (s.id IS NOT NULL), COALESCE(s.importance_score, 0), COALESCE(s.virality_score, 0),
@@ -278,6 +280,7 @@ func scanJobView(s scanner) (JobView, error) {
 		&v.ID, &v.NewsCandidateID, &v.SocialAccountID, &v.Status, &v.RequestedVariantCount,
 		&v.SelectedVariantID, &v.InstagramMediaID, &v.AIProvider, &v.AIModel, &v.AIError,
 		&v.ErrorMessage, &v.AIRetryCount, &v.NextAIRetryAt, &v.CreatedAt, &v.UpdatedAt,
+		&v.ScheduledPublishAt,
 		&v.Title, &v.Summary, &v.Source, &v.SourceURL, &v.Category, &v.PublishedAt,
 		&v.AccountCode, &v.AccountName, &v.InstagramUserID, &v.VariantCount, &v.NotifyThreshold, &v.AccountActive,
 		&v.HasScore, &v.ImportanceScore, &v.ViralityScore, &v.AccountFit, &v.ShouldNotify,

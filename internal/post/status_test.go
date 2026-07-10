@@ -20,6 +20,14 @@ func TestCanTransition(t *testing.T) {
 		{StatusWaitingVariantApproval, StatusApproved, false},
 		{StatusApproved, StatusPublishing, true},
 		{StatusPublishing, StatusPublished, true},
+		// Scheduled (deferred) publishing.
+		{StatusReadyToPublish, StatusScheduled, true},
+		{StatusScheduled, StatusApproved, true},
+		{StatusScheduled, StatusReadyToPublish, true},
+		{StatusScheduled, StatusSkipped, true},
+		{StatusScheduled, StatusFailed, true},
+		{StatusScheduled, StatusPublishing, false},
+		{StatusApproved, StatusScheduled, false},
 		// Disallowed jumps.
 		{StatusNew, StatusPublished, false},
 		{StatusScored, StatusApproved, false},
@@ -28,6 +36,7 @@ func TestCanTransition(t *testing.T) {
 		// No-op transitions are rejected so they cannot repeat side effects.
 		{StatusWaitingAI, StatusWaitingAI, false},
 		{StatusPublishing, StatusPublishing, false},
+		{StatusScheduled, StatusScheduled, false},
 	}
 	for _, c := range cases {
 		if got := CanTransition(c.from, c.to); got != c.want {

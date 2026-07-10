@@ -29,6 +29,7 @@ hazırlar ve Instagram Graph API ile yayınlar.
 - [Docker Compose kullanımı](#docker-compose-kullanımı)
 - [HTTP API ve örnek curl komutları](#http-api-ve-örnek-curl-komutları)
 - [Status flow](#status-flow)
+- [Zamanlanmış yayın](#zamanlanmış-yayın)
 - [Görsel üretimi](#görsel-üretimi)
 - [Klasör yapısı](#klasör-yapısı)
 - [Test](#test)
@@ -383,9 +384,10 @@ Panelde aşağıdaki ekranlar bulunur:
 
 Panelde varyant seçimi işi `READY_TO_PUBLISH` durumunda tutar. Görsel bu aşamada
 gerçek renderer ile hazırlanır; operatör caption ve görseli gördükten sonra ayrı
-bir **Onayla ve yayınla** aksiyonuyla işi `APPROVED` yayın kuyruğuna alır. Mevcut
-Telegram ve JSON API onayları geriye uyumluluk için bu iki adımı tek işlemde
-tamamlamaya devam eder.
+bir **Hemen yayınla** aksiyonuyla işi `APPROVED` yayın kuyruğuna alır ya da bir
+tarih/saat seçerek yayını ileri bir zamana planlar (bkz. [Zamanlanmış yayın](#zamanlanmış-yayın)).
+Mevcut Telegram ve JSON API onayları geriye uyumluluk için seçim + yayın
+adımlarını tek işlemde tamamlamaya devam eder.
 
 HTMX ve panel varlıkları binary içine gömülüdür; çalışma zamanında CDN çağrısı
 yapılmaz.
@@ -422,7 +424,9 @@ compose'tan alır. Ollama'ya host üzerinden erişmek için
 | POST   | `/api/posts/{id}/generate`    | Alternatif üretimini başlat           |
 | POST   | `/api/posts/{id}/approve`     | Alternatif seç (`{"variantId": N}`)   |
 | POST   | `/api/posts/{id}/reject`      | Jobu atla (`SKIPPED`)                 |
-| POST   | `/api/posts/{id}/publish`     | Seçili alternatifi yayın kuyruğuna al |
+| POST   | `/api/posts/{id}/publish`     | Seçili alternatifi hemen yayın kuyruğuna al |
+| POST   | `/api/posts/{id}/schedule`    | Seçili alternatifi ileri bir zamana planla  |
+| POST   | `/api/posts/{id}/unschedule`  | Zamanlamayı iptal et (→ READY_TO_PUBLISH)   |
 | POST   | `/api/telegram/callback`      | Telegram callback giriş noktası       |
 | GET    | `/api/analytics/posts`        | Durum bazlı özet                      |
 | GET    | `/static/*`                   | Üretilen görseller (public URL)       |
@@ -446,6 +450,13 @@ curl -s -X POST -H "$AUTH" localhost:8080/api/posts/1/generate
 # Alternatif seç → görsel + (dry-run) yayın
 curl -s -X POST localhost:8080/api/posts/1/approve \
   -H "$AUTH" -H 'Content-Type: application/json' -d '{"variantId": 1}'
+
+# Seçili alternatifi ileri bir zamana planla (RFC3339, örn. UTC)
+curl -s -X POST localhost:8080/api/posts/1/schedule \
+  -H "$AUTH" -H 'Content-Type: application/json' -d '{"scheduledAt": "2026-07-11T09:00:00Z"}'
+
+# Zamanlamayı iptal et (iş READY_TO_PUBLISH'e döner)
+curl -s -X POST -H "$AUTH" localhost:8080/api/posts/1/unschedule
 
 # Telegram callback simülasyonu: "Post Hazırla"
 BODY='{"action":"GENERATE_POST","payload":"1","user":"gokhan"}'
@@ -481,15 +492,49 @@ NEW
                              ├─▶ VARIANTS_QUEUED      ("Yeniden Üret")
                              └─▶ READY_TO_PUBLISH      (panel seçimi + gerçek önizleme)
                                     ├─▶ VARIANTS_QUEUED / SKIPPED
-                                    └─▶ APPROVED       (açık yayın onayı)
+                                    ├─▶ SCHEDULED      (ileri tarihli yayın)
+                                    │      ├─▶ READY_TO_PUBLISH  (zamanlama iptal)
+                                    │      ├─▶ APPROVED          (zaman gelince, worker promote eder)
+                                    │      └─▶ SKIPPED / FAILED
+                                    └─▶ APPROVED       (hemen yayın onayı)
                                            └─▶ PUBLISHING ─▶ PUBLISHED
                                                           └─▶ FAILED
 ```
 
 Telegram ve `/api/posts/{id}/approve` geriye uyumluluk için
 `READY_TO_PUBLISH → APPROVED` geçişini aynı istek içinde tamamlar.
+`SCHEDULED` işler, planlanan zaman geldiğinde `publish-approved` worker'ı
+tarafından atomik olarak `APPROVED`'a alınır ve yayınlanır.
 
 Terminal durumlar: `PUBLISHED`, `SKIPPED`, `FAILED`.
+
+---
+
+## Zamanlanmış yayın
+
+Yayına hazır (`READY_TO_PUBLISH`) bir iş hemen yayınlanmak yerine ileri bir
+zamana planlanabilir. Böylece içerik, izleyici etkileşiminin yüksek olduğu
+saatlerde otomatik yayınlanır.
+
+- **Panelden:** post detayında, seçili varyantın önizlemesi hazır olduğunda
+  "Hemen yayınla" düğmesinin yanında bir tarih/saat alanı belirir. Girilen zaman
+  **sunucunun yerel saatine** göre yorumlanır. Zamanlanan iş `SCHEDULED` durumuna
+  geçer; istenirse "Zamanlamayı iptal et" ile `READY_TO_PUBLISH`'e geri alınır.
+- **API'den:** `POST /api/posts/{id}/schedule` gövdesinde **RFC3339** (zaman
+  dilimi açık) bir `scheduledAt` beklenir. `POST /api/posts/{id}/unschedule`
+  zamanlamayı iptal eder.
+
+Kurallar ve dayanıklılık:
+
+- Zaman **gelecekte** ve en fazla **30 gün** ileride olmalıdır; aksi halde API
+  `400` döner.
+- Zaman geldiğinde `publish-approved` worker'ı işi **atomik** biçimde
+  `SCHEDULED → APPROVED` yapar ve yayınlar; birden fazla instance çalışsa bile bir
+  iş iki kez yayınlanmaz.
+- Planlanan zaman, yayından sonra da denetim için `scheduled_publish_at`
+  sütununda saklanır.
+- Zamanlama, durum makinesinin bir parçasıdır: `SCHEDULED` yalnızca
+  `READY_TO_PUBLISH`, `APPROVED`, `SKIPPED` veya `FAILED`'e geçebilir.
 
 ---
 

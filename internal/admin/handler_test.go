@@ -100,6 +100,26 @@ func TestLoginSessionAndCSRF(t *testing.T) {
 	}
 }
 
+func TestParseAdminScheduleTime(t *testing.T) {
+	if _, err := parseAdminScheduleTime("  "); err == nil {
+		t.Fatal("empty value should be rejected")
+	}
+	if _, err := parseAdminScheduleTime("11-07-2026 09:00"); err == nil {
+		t.Fatal("non datetime-local value should be rejected")
+	}
+	got, err := parseAdminScheduleTime("2026-07-11T09:30")
+	if err != nil {
+		t.Fatalf("valid datetime-local rejected: %v", err)
+	}
+	want := time.Date(2026, 7, 11, 9, 30, 0, 0, time.Local)
+	if !got.Equal(want) {
+		t.Fatalf("got %v, want %v (local)", got, want)
+	}
+	if _, err := parseAdminScheduleTime("2026-07-11T09:30:45"); err != nil {
+		t.Fatalf("datetime-local with seconds rejected: %v", err)
+	}
+}
+
 func TestSessionRejectsTamperingAndExpiry(t *testing.T) {
 	codec := newSessionCodec(adminTestToken, true)
 	value, _, err := codec.create(time.Now())
@@ -132,10 +152,16 @@ func TestAllPageTemplatesExecute(t *testing.T) {
 	h := testHandler(t)
 	now := time.Now()
 	job := JobView{ID: 7, Status: post.StatusReadyToPublish, Title: "<script>alert(1)</script>", Category: "technology", AccountCode: "teknoloji", UpdatedAt: now}
+	selectedVariant := VariantView{Variant: post.Variant{ID: 4, Caption: "caption", VariantNo: 1}, Selected: true, PreviewPath: "/static/x.png"}
+	scheduledJob := JobView{ID: 8, Status: post.StatusScheduled, Title: "Planlı içerik", Category: "technology", AccountCode: "teknoloji", UpdatedAt: now, ScheduledPublishAt: sql.NullTime{Time: now.Add(time.Hour), Valid: true}}
 	data := []ViewData{
 		{Page: "dashboard", Title: "Dashboard", Dashboard: DashboardData{Recent: []JobView{job}, Counts: []StatusCount{{Status: post.StatusReadyToPublish, Count: 1}}}},
 		{Page: "posts", Title: "Posts", Jobs: JobPage{Items: []JobView{job}, Page: makePage(1, 1)}},
 		{Page: "post-detail", Title: "Detail", JobDetail: JobDetailData{Job: job, Variants: []VariantView{{Variant: post.Variant{ID: 4, Caption: "caption", VariantNo: 1}}}, CanEdit: true, CanSelect: true}},
+		// Ready to publish with a selected preview: renders the schedule form (nowInput func).
+		{Page: "post-detail", Title: "Schedulable", JobDetail: JobDetailData{Job: job, Variants: []VariantView{selectedVariant}, Selected: &selectedVariant, CanPublish: true, CanSchedule: true}},
+		// Scheduled job: renders the scheduled-status card (formatDate on the time) and unschedule form.
+		{Page: "post-detail", Title: "Scheduled", JobDetail: JobDetailData{Job: scheduledJob, IsScheduled: true}},
 		{Page: "news", Title: "News", News: NewsPage{Items: []NewsView{{ID: 1, Title: "Haber", JobStatus: post.StatusReadyToPublish}}, Page: makePage(1, 1)}},
 		{Page: "accounts", Title: "Accounts", Accounts: []account.Account{{Code: "tech", Name: "Tech", Category: "technology", IsActive: true, UpdatedAt: now}}},
 		{Page: "system", Title: "System", System: SystemData{DatabaseConnected: true}},

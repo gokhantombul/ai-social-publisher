@@ -246,7 +246,20 @@
         {{end}}
         {{if .JobDetail.CanPublish}}
         <div class="publish-warning"><strong>Son kontrol</strong><p>Bu işlem postu Instagram yayın kuyruğuna alır ve geri alınamaz.</p></div>
-        <form hx-post="/admin/posts/{{.JobDetail.Job.ID}}/publish" hx-target="#job-panel" hx-swap="outerHTML" hx-confirm="Seçili caption ve görsel Instagram yayın kuyruğuna alınacak. Emin misiniz?" method="post" action="/admin/posts/{{.JobDetail.Job.ID}}/publish"><input type="hidden" name="_csrf" value="{{.CSRF}}"><button class="button danger wide" type="submit">Onayla ve yayınla</button></form>
+        <form hx-post="/admin/posts/{{.JobDetail.Job.ID}}/publish" hx-target="#job-panel" hx-swap="outerHTML" hx-confirm="Seçili caption ve görsel Instagram yayın kuyruğuna alınacak. Emin misiniz?" method="post" action="/admin/posts/{{.JobDetail.Job.ID}}/publish"><input type="hidden" name="_csrf" value="{{.CSRF}}"><button class="button danger wide" type="submit">Hemen yayınla</button></form>
+        {{end}}
+        {{if .JobDetail.CanSchedule}}
+        <form class="schedule-form" hx-post="/admin/posts/{{.JobDetail.Job.ID}}/schedule" hx-target="#job-panel" hx-swap="outerHTML" method="post" action="/admin/posts/{{.JobDetail.Job.ID}}/schedule">
+          <input type="hidden" name="_csrf" value="{{.CSRF}}">
+          <label for="schedule-at">Yayını ileri bir saate planla</label>
+          <input id="schedule-at" type="datetime-local" name="scheduledAt" min="{{nowInput}}" required>
+          <button class="button secondary wide" type="submit">Seçilen zamanda yayınla</button>
+          <small>Saat sunucunun yerel saatine göre yorumlanır. En fazla 30 gün ileri planlanabilir.</small>
+        </form>
+        {{end}}
+        {{if .JobDetail.IsScheduled}}
+        <div class="schedule-status"><strong>⏰ Yayın zamanlandı</strong><p>Planlanan zaman: {{formatDate .JobDetail.Job.ScheduledPublishAt}}</p></div>
+        <form hx-post="/admin/posts/{{.JobDetail.Job.ID}}/unschedule" hx-target="#job-panel" hx-swap="outerHTML" hx-confirm="Zamanlama iptal edilip iş yayına hazır durumuna dönecek. Devam edilsin mi?" method="post" action="/admin/posts/{{.JobDetail.Job.ID}}/unschedule"><input type="hidden" name="_csrf" value="{{.CSRF}}"><button class="button ghost wide" type="submit">Zamanlamayı iptal et</button></form>
         {{end}}
         {{if .JobDetail.CanRegenerate}}
         <form hx-post="/admin/posts/{{.JobDetail.Job.ID}}/regenerate" hx-target="#job-panel" hx-swap="outerHTML" hx-confirm="Mevcut alternatifler silinip yeniden üretilecek. Devam edilsin mi?" method="post" action="/admin/posts/{{.JobDetail.Job.ID}}/regenerate"><input type="hidden" name="_csrf" value="{{.CSRF}}"><button class="button secondary wide" type="submit">Alternatifleri yeniden üret</button></form>
@@ -254,7 +267,7 @@
         {{if .JobDetail.CanSkip}}
         <form hx-post="/admin/posts/{{.JobDetail.Job.ID}}/skip" hx-target="#job-panel" hx-swap="outerHTML" hx-confirm="Bu içerik atlanacak. Devam edilsin mi?" method="post" action="/admin/posts/{{.JobDetail.Job.ID}}/skip"><input type="hidden" name="_csrf" value="{{.CSRF}}"><button class="button ghost wide" type="submit">İşi atla</button></form>
         {{end}}
-        {{if not .JobDetail.CanSkip}}{{if not .JobDetail.CanPublish}}{{if not .JobDetail.CanGenerate}}<p class="muted">Bu durumda kullanılabilir manuel aksiyon yok.</p>{{end}}{{end}}{{end}}
+        {{if not .JobDetail.CanSkip}}{{if not .JobDetail.CanPublish}}{{if not .JobDetail.CanGenerate}}{{if not .JobDetail.IsScheduled}}<p class="muted">Bu durumda kullanılabilir manuel aksiyon yok.</p>{{end}}{{end}}{{end}}{{end}}
       </section>
 
       <section class="panel metadata-panel">

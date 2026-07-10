@@ -7,9 +7,11 @@ import (
 	"io"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"ai-social-publisher/internal/account"
+	"ai-social-publisher/internal/approval"
 	"ai-social-publisher/internal/post"
 	"ai-social-publisher/internal/telegram"
 
@@ -51,6 +53,8 @@ func statusForRepoError(err error) int {
 		return http.StatusNotFound
 	case errors.Is(err, post.ErrInvalidTransition):
 		return http.StatusConflict
+	case errors.Is(err, approval.ErrInvalidSchedule):
+		return http.StatusBadRequest
 	default:
 		return http.StatusInternalServerError
 	}
@@ -203,6 +207,49 @@ func (h *Handler) publishPost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusAccepted, map[string]string{"status": "publish_queued"})
+}
+
+type scheduleRequest struct {
+	ScheduledAt string `json:"scheduledAt"`
+}
+
+// schedulePost defers publishing of a reviewed job to a future time. The body
+// carries an RFC3339 timestamp: {"scheduledAt": "2026-07-11T09:00:00Z"}.
+func (h *Handler) schedulePost(w http.ResponseWriter, r *http.Request) {
+	id, err := h.pathID(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid id")
+		return
+	}
+	var in scheduleRequest
+	if err := decodeJSON(w, r, &in); err != nil {
+		writeError(w, http.StatusBadRequest, "scheduledAt is required (RFC3339)")
+		return
+	}
+	at, err := time.Parse(time.RFC3339, strings.TrimSpace(in.ScheduledAt))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "scheduledAt must be an RFC3339 timestamp")
+		return
+	}
+	if err := h.approval.SchedulePublish(r.Context(), id, at); err != nil {
+		h.writeHandlerError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]string{"status": "scheduled"})
+}
+
+// unschedulePost cancels a pending schedule, returning the job to review.
+func (h *Handler) unschedulePost(w http.ResponseWriter, r *http.Request) {
+	id, err := h.pathID(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid id")
+		return
+	}
+	if err := h.approval.CancelScheduledPublish(r.Context(), id); err != nil {
+		h.writeHandlerError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "unscheduled"})
 }
 
 func (h *Handler) telegramCallback(w http.ResponseWriter, r *http.Request) {

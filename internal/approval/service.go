@@ -28,6 +28,13 @@ import (
 	"ai-social-publisher/internal/telegram"
 )
 
+// ErrInvalidSchedule is returned when a requested publish time is not acceptable
+// (in the past or beyond the allowed horizon). It maps to a 400 at the API edge.
+var ErrInvalidSchedule = errors.New("invalid schedule time")
+
+// maxScheduleHorizon bounds how far ahead a publish may be scheduled.
+const maxScheduleHorizon = 30 * 24 * time.Hour
+
 // Service coordinates the full content pipeline.
 type Service struct {
 	cfg        *config.Config
@@ -518,6 +525,69 @@ func (s *Service) QueuePublish(ctx context.Context, jobID int64) error {
 	return fmt.Errorf("%w: %s is not publishable", post.ErrInvalidTransition, job.Status)
 }
 
+// SchedulePublish defers a reviewed job to publish at a future time instead of
+// immediately. A job already READY_TO_PUBLISH is moved to SCHEDULED (rendering
+// its preview first if needed); an already SCHEDULED job is rescheduled. The
+// publish worker promotes it to APPROVED once the time arrives.
+func (s *Service) SchedulePublish(ctx context.Context, jobID int64, at time.Time) error {
+	validAt, err := validateScheduleAt(time.Now(), at, maxScheduleHorizon)
+	if err != nil {
+		return err
+	}
+	job, candidate, _, err := s.loadJobContext(ctx, jobID)
+	if err != nil {
+		return err
+	}
+	switch job.Status {
+	case post.StatusScheduled:
+		if err := s.posts.Reschedule(ctx, jobID, validAt); err != nil {
+			return err
+		}
+	case post.StatusReadyToPublish:
+		if !job.SelectedVariantID.Valid {
+			return fmt.Errorf("job %d has no selected variant", jobID)
+		}
+		variant, err := s.posts.GetVariantByID(ctx, job.SelectedVariantID.Int64)
+		if err != nil {
+			return err
+		}
+		if strings.TrimSpace(variant.ImageURL) == "" {
+			if err := s.PreparePreview(ctx, jobID); err != nil {
+				return err
+			}
+		}
+		if err := s.posts.Schedule(ctx, jobID, validAt); err != nil {
+			return err
+		}
+	default:
+		return fmt.Errorf("%w: %s is not schedulable", post.ErrInvalidTransition, job.Status)
+	}
+
+	return s.queueNotice(ctx, fmt.Sprintf("scheduled:%d:%d", jobID, validAt.Unix()),
+		"⏰ Yayın zamanlandı",
+		fmt.Sprintf("\"%s\" için Instagram yayını %s (UTC) zamanına planlandı.", candidate.Title, validAt.Format("02.01.2006 15:04")),
+		nil)
+}
+
+// CancelScheduledPublish returns a SCHEDULED job to READY_TO_PUBLISH so the
+// operator can review, reschedule or publish it immediately.
+func (s *Service) CancelScheduledPublish(ctx context.Context, jobID int64) error {
+	return s.posts.CancelSchedule(ctx, jobID)
+}
+
+// validateScheduleAt normalises a requested time to UTC and checks it is in the
+// future and within the allowed horizon.
+func validateScheduleAt(now, at time.Time, horizon time.Duration) (time.Time, error) {
+	at = at.UTC()
+	if !at.After(now) {
+		return time.Time{}, fmt.Errorf("%w: scheduled time must be in the future", ErrInvalidSchedule)
+	}
+	if at.After(now.Add(horizon)) {
+		return time.Time{}, fmt.Errorf("%w: scheduled time must be within %d days", ErrInvalidSchedule, int(horizon/(24*time.Hour)))
+	}
+	return at, nil
+}
+
 // SkipJob marks a job skipped (from first approval).
 func (s *Service) SkipJob(ctx context.Context, jobID int64) error {
 	return s.posts.UpdateStatus(ctx, jobID, post.StatusSkipped)
@@ -744,6 +814,31 @@ func (s *Service) PublishApproved(ctx context.Context) error {
 		return err
 	}
 	for _, job := range jobs {
+		if err := s.PublishJob(ctx, job.ID); err != nil {
+			s.logger.Error("scheduled publish failed", "job_id", job.ID, "error", err)
+		}
+	}
+	return nil
+}
+
+// ProcessScheduledPublishes promotes SCHEDULED jobs whose time has arrived to
+// APPROVED and publishes them. Promotion is an atomic, gated claim so a job is
+// never published twice even with several application instances running.
+func (s *Service) ProcessScheduledPublishes(ctx context.Context) error {
+	now := time.Now()
+	jobs, err := s.posts.ListDueScheduled(ctx, now, 20)
+	if err != nil {
+		return err
+	}
+	for _, job := range jobs {
+		claimed, err := s.posts.ClaimScheduledDue(ctx, job.ID, now)
+		if err != nil {
+			s.logger.Error("claim due scheduled job failed", "job_id", job.ID, "error", err)
+			continue
+		}
+		if !claimed {
+			continue // not due yet or claimed by another worker
+		}
 		if err := s.PublishJob(ctx, job.ID); err != nil {
 			s.logger.Error("scheduled publish failed", "job_id", job.ID, "error", err)
 		}
