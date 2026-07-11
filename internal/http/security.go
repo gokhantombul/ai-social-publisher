@@ -83,42 +83,69 @@ type rateWindow struct {
 	count   int
 }
 
+// maxTrackedClients bounds limiter memory. When the table is full, requests
+// from brand-new keys pass untracked: rotating source addresses defeats a
+// per-client limit anyway, and failing closed would lock out legitimate users.
+const maxTrackedClients = 50_000
+
 type ipRateLimiter struct {
-	mu      sync.Mutex
-	limit   int
-	window  time.Duration
-	clients map[string]rateWindow
+	mu        sync.Mutex
+	limit     int
+	window    time.Duration
+	clients   map[string]rateWindow
+	lastSweep time.Time
 }
 
 func newIPRateLimiter(limit int, window time.Duration) *ipRateLimiter {
 	return &ipRateLimiter{limit: limit, window: window, clients: map[string]rateWindow{}}
 }
 
-func (l *ipRateLimiter) middleware(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		host, _, err := net.SplitHostPort(r.RemoteAddr)
-		if err != nil {
-			host = r.RemoteAddr
-		}
-		now := time.Now()
-		l.mu.Lock()
-		entry := l.clients[host]
-		if entry.started.IsZero() || now.Sub(entry.started) >= l.window {
-			entry = rateWindow{started: now}
-		}
-		entry.count++
-		l.clients[host] = entry
-		allowed := entry.count <= l.limit
-		// Opportunistic cleanup keeps the map bounded without another goroutine.
-		if len(l.clients) > 10_000 {
-			for key, value := range l.clients {
-				if now.Sub(value.started) >= l.window {
-					delete(l.clients, key)
-				}
+// rateLimitKey buckets IPv6 clients by /64: one host effectively owns its /64,
+// so tracking individual addresses would let a single attacker mint unlimited
+// limiter entries (and dodge its own limit) by rotating within the prefix.
+func rateLimitKey(remoteAddr string) string {
+	host, _, err := net.SplitHostPort(remoteAddr)
+	if err != nil {
+		host = remoteAddr
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return host
+	}
+	if v4 := ip.To4(); v4 != nil {
+		return v4.String()
+	}
+	return ip.Mask(net.CIDRMask(64, 128)).String()
+}
+
+func (l *ipRateLimiter) allow(remoteAddr string, now time.Time) bool {
+	key := rateLimitKey(remoteAddr)
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	// Sweep expired windows at most once per window so a large client table
+	// never turns every request into a full map scan.
+	if now.Sub(l.lastSweep) >= l.window {
+		for k, v := range l.clients {
+			if now.Sub(v.started) >= l.window {
+				delete(l.clients, k)
 			}
 		}
-		l.mu.Unlock()
-		if !allowed {
+		l.lastSweep = now
+	}
+	entry, tracked := l.clients[key]
+	if entry.started.IsZero() || now.Sub(entry.started) >= l.window {
+		entry = rateWindow{started: now}
+	}
+	entry.count++
+	if tracked || len(l.clients) < maxTrackedClients {
+		l.clients[key] = entry
+	}
+	return entry.count <= l.limit
+}
+
+func (l *ipRateLimiter) middleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !l.allow(r.RemoteAddr, time.Now()) {
 			w.Header().Set("Retry-After", "60")
 			writeError(w, http.StatusTooManyRequests, "rate limit exceeded")
 			return

@@ -2,9 +2,11 @@ module ai-social-publisher
 
 go 1.26
 
+toolchain go1.26.5
+
 require (
 	github.com/go-chi/chi/v5 v5.1.0
-	github.com/jackc/pgx/v5 v5.9.0
+	github.com/jackc/pgx/v5 v5.9.2
 	github.com/pressly/goose/v3 v3.24.1
 	golang.org/x/image v0.42.0
 	gopkg.in/yaml.v3 v3.0.1

@@ -9,7 +9,10 @@ import (
 	"log/slog"
 	stdhttp "net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -80,6 +83,56 @@ func TestIPRateLimiter(t *testing.T) {
 		next.ServeHTTP(w, req)
 		if w.Code != want {
 			t.Fatalf("request %d: expected %d, got %d", i+1, want, w.Code)
+		}
+	}
+}
+
+func TestRateLimitKeyBucketsIPv6ByPrefix(t *testing.T) {
+	sameA := rateLimitKey("[2001:db8:1:2:aaaa:bbbb:cccc:dddd]:443")
+	sameB := rateLimitKey("[2001:db8:1:2:1111:2222:3333:4444]:443")
+	other := rateLimitKey("[2001:db8:9:9::1]:443")
+	if sameA != sameB {
+		t.Fatalf("addresses in the same /64 must share a bucket: %q vs %q", sameA, sameB)
+	}
+	if sameA == other {
+		t.Fatalf("addresses in different /64s must not share a bucket: %q", sameA)
+	}
+	if key := rateLimitKey("192.0.2.10:1234"); key != "192.0.2.10" {
+		t.Fatalf("ipv4 key: expected bare address, got %q", key)
+	}
+}
+
+func TestStaticFileServerRejectsListingsAndDotfiles(t *testing.T) {
+	dir := t.TempDir()
+	writeFile := func(name, content string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeFile("post.png", "png-bytes")
+	writeFile(".upload-secret", "in-progress upload")
+
+	handler := stdhttp.StripPrefix("/static/", staticFileServer(dir))
+	cases := []struct {
+		method string
+		path   string
+		want   int
+	}{
+		{stdhttp.MethodGet, "/static/post.png", stdhttp.StatusOK},
+		{stdhttp.MethodGet, "/static/", stdhttp.StatusNotFound},
+		{stdhttp.MethodGet, "/static/.upload-secret", stdhttp.StatusNotFound},
+		{stdhttp.MethodGet, "/static/missing.png", stdhttp.StatusNotFound},
+		{stdhttp.MethodPost, "/static/post.png", stdhttp.StatusMethodNotAllowed},
+	}
+	for _, tc := range cases {
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, httptest.NewRequest(tc.method, tc.path, nil))
+		if w.Code != tc.want {
+			t.Fatalf("%s %s: expected %d, got %d", tc.method, tc.path, tc.want, w.Code)
+		}
+		if tc.want == stdhttp.StatusNotFound && strings.Contains(w.Body.String(), "upload-secret") {
+			t.Fatalf("%s %s: response leaked directory contents", tc.method, tc.path)
 		}
 	}
 }

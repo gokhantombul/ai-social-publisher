@@ -4,6 +4,7 @@ package media
 
 import (
 	"context"
+	"crypto/rand"
 	"fmt"
 	"image"
 	"image/color"
@@ -156,7 +157,13 @@ func (r *TemplateRenderer) RenderPostImage(ctx context.Context, variant post.Var
 	logoBox := image.Rect(canvasSize-margin-120, 60, canvasSize-margin, 180)
 	draw.Draw(img, logoBox, &image.Uniform{color.RGBA{0xFF, 0xFF, 0xFF, 0x22}}, image.Point{}, draw.Over)
 
-	name := fmt.Sprintf("post_%s_v%d_%d.png", acct.Code, variant.VariantNo, time.Now().UnixNano())
+	// A random component keeps draft URLs unguessable: rendered media is served
+	// publicly (Instagram must fetch it) before the operator decides to publish.
+	var nonce [8]byte
+	if _, err := rand.Read(nonce[:]); err != nil {
+		return nil, fmt.Errorf("generate media file name: %w", err)
+	}
+	name := fmt.Sprintf("post_%s_v%d_%d_%x.png", acct.Code, variant.VariantNo, time.Now().UnixNano(), nonce)
 	outPath := filepath.Join(r.outputDir, name)
 
 	f, err := os.Create(outPath)

@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"fmt"
 	"log/slog"
+	"time"
 
 	"ai-social-publisher/internal/config"
 	"ai-social-publisher/migrations"
@@ -25,6 +26,9 @@ func Connect(ctx context.Context, cfg config.DatabaseConfig) (*sql.DB, error) {
 	db.SetMaxOpenConns(cfg.MaxOpenConns)
 	db.SetMaxIdleConns(cfg.MaxIdleConns)
 	db.SetConnMaxLifetime(cfg.ConnMaxLifetime())
+	// Release idle connections well before their lifetime cap so quiet periods
+	// do not pin server-side resources.
+	db.SetConnMaxIdleTime(5 * time.Minute)
 
 	if err := db.PingContext(ctx); err != nil {
 		_ = db.Close()

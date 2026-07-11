@@ -99,6 +99,7 @@ func (h *Handler) routes() http.Handler {
 	r.Get("/", func(w http.ResponseWriter, r *http.Request) { http.Redirect(w, r, "/admin", http.StatusSeeOther) })
 
 	r.Group(func(r chi.Router) {
+		r.Use(maxRequestBytes(64 << 10))
 		r.Use(h.requireSession)
 		r.Get("/admin", h.dashboard)
 		r.Get("/admin/fragments/dashboard", h.dashboardFragment)
@@ -568,6 +569,16 @@ func (h *Handler) handleNotFound(w http.ResponseWriter, err error) {
 		return
 	}
 	h.serverError(w, err)
+}
+
+// maxRequestBytes caps request bodies; console forms are far below this limit.
+func maxRequestBytes(limit int64) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			r.Body = http.MaxBytesReader(w, r.Body, limit)
+			next.ServeHTTP(w, r)
+		})
+	}
 }
 
 func routeID(w http.ResponseWriter, r *http.Request, name string) (int64, bool) {
