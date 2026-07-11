@@ -7,12 +7,17 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
 )
+
+// accountCodeRe restricts account codes to path- and filename-safe characters:
+// the code is embedded in rendered media file names on disk.
+var accountCodeRe = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
 
 // Config is the root configuration object.
 type Config struct {
@@ -397,6 +402,9 @@ func (c *Config) validate() error {
 	for _, a := range c.Accounts {
 		if a.Code == "" {
 			return fmt.Errorf("account code must not be empty")
+		}
+		if !accountCodeRe.MatchString(a.Code) {
+			return fmt.Errorf("account code %q may only contain letters, digits, '-' and '_'", a.Code)
 		}
 		if seen[a.Code] {
 			return fmt.Errorf("duplicate account code %q", a.Code)

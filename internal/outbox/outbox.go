@@ -116,6 +116,19 @@ WHERE id = $1`, id, time.Now().Add(delay), msg)
 	return err
 }
 
+// PurgeSent deletes delivered messages older than cutoff so the outbox stays
+// small. Dead messages are kept for operator inspection. Callers must keep the
+// retention comfortably longer than any notification-repair lookback, otherwise
+// repair could re-enqueue (and re-send) a purged dedupe key.
+func (r *Repository) PurgeSent(ctx context.Context, cutoff time.Time) (int64, error) {
+	result, err := r.db.ExecContext(ctx,
+		`DELETE FROM notification_outbox WHERE sent_at IS NOT NULL AND sent_at < $1`, cutoff)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 func (r *Repository) Counts(ctx context.Context) (pending, dead int, err error) {
 	err = r.db.QueryRowContext(ctx, `SELECT
     COUNT(*) FILTER (WHERE sent_at IS NULL AND dead_at IS NULL),

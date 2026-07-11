@@ -149,12 +149,14 @@ func (r *Repository) ListByStatus(ctx context.Context, status Status, limit int)
 	return out, rows.Err()
 }
 
-func (r *Repository) ListRecentByStatus(ctx context.Context, status Status, limit int) ([]Job, error) {
+// ListRecentByStatus returns jobs in a status updated at or after since, newest
+// first. The cutoff keeps notification repair from rescanning old history.
+func (r *Repository) ListRecentByStatus(ctx context.Context, status Status, since time.Time, limit int) ([]Job, error) {
 	if limit <= 0 || limit > 200 {
 		limit = 50
 	}
-	q := `SELECT ` + jobColumns + ` FROM post_jobs WHERE status = $1 ORDER BY updated_at DESC LIMIT $2`
-	rows, err := r.db.QueryContext(ctx, q, status, limit)
+	q := `SELECT ` + jobColumns + ` FROM post_jobs WHERE status = $1 AND updated_at >= $2 ORDER BY updated_at DESC LIMIT $3`
+	rows, err := r.db.QueryContext(ctx, q, status, since, limit)
 	if err != nil {
 		return nil, err
 	}

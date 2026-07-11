@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"path"
+	"strings"
 	"time"
 
 	"ai-social-publisher/internal/account"
@@ -70,6 +72,7 @@ func NewServer(d Deps) *http.Server {
 	r.Use(middleware.Recoverer)
 	r.Use(requestLogger(h.logger))
 	r.Use(middleware.Timeout(60 * time.Second))
+	r.Use(baseSecurityHeaders(d.Config.App.Env == "production"))
 
 	r.Get("/live", h.live)
 	r.Get("/health", h.health)
@@ -104,7 +107,7 @@ func NewServer(d Deps) *http.Server {
 
 	// Serve rendered media so Instagram (and humans) can fetch the public URL.
 	if d.StaticDir != "" {
-		fs := http.StripPrefix("/static/", http.FileServer(http.Dir(d.StaticDir)))
+		fs := http.StripPrefix("/static/", staticFileServer(d.StaticDir))
 		r.Handle("/static/*", fs)
 	}
 	if d.Admin != nil {
@@ -120,6 +123,57 @@ func NewServer(d Deps) *http.Server {
 		IdleTimeout:       60 * time.Second,
 		MaxHeaderBytes:    1 << 20,
 	}
+}
+
+// baseSecurityHeaders applies headers every response should carry, including
+// the API and rendered media. The admin console layers its CSP on top.
+func baseSecurityHeaders(production bool) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			h := w.Header()
+			h.Set("X-Content-Type-Options", "nosniff")
+			h.Set("X-Frame-Options", "DENY")
+			h.Set("Referrer-Policy", "same-origin")
+			if production {
+				h.Set("Strict-Transport-Security", "max-age=31536000")
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
+// staticFileServer serves rendered media files. Unlike a bare http.FileServer
+// it refuses directory listings, dotfiles and in-progress upload temp files so
+// unauthenticated clients cannot enumerate unpublished drafts.
+func staticFileServer(dir string) http.Handler {
+	root := http.Dir(dir)
+	files := http.FileServer(root)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			w.Header().Set("Allow", "GET, HEAD")
+			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		clean := path.Clean("/" + r.URL.Path)
+		if strings.HasPrefix(path.Base(clean), ".") || clean == "/" {
+			http.NotFound(w, r)
+			return
+		}
+		f, err := root.Open(clean)
+		if err != nil {
+			http.NotFound(w, r)
+			return
+		}
+		info, err := f.Stat()
+		_ = f.Close()
+		if err != nil || info.IsDir() {
+			http.NotFound(w, r)
+			return
+		}
+		// Rendered file names are unique per render, so contents never change.
+		w.Header().Set("Cache-Control", "public, max-age=86400, immutable")
+		files.ServeHTTP(w, r)
+	})
 }
 
 // requestLogger logs each request at info level.

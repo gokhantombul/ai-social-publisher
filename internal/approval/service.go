@@ -35,6 +35,21 @@ var ErrInvalidSchedule = errors.New("invalid schedule time")
 // maxScheduleHorizon bounds how far ahead a publish may be scheduled.
 const maxScheduleHorizon = 30 * 24 * time.Hour
 
+// repairLookback bounds how far back terminal-state (published/failed)
+// notification repair scans. The crash window it covers is seconds wide, so a
+// generous few days is plenty.
+const repairLookback = 7 * 24 * time.Hour
+
+// outboxRetention is how long delivered notifications are kept before purging.
+// It must stay well above repairLookback so repair never re-enqueues a purged
+// dedupe key for a terminal-state job.
+const outboxRetention = 30 * 24 * time.Hour
+
+// workerBatchSize caps how many queued jobs one worker pass drains. Jobs are
+// claimed one at a time immediately before processing, so a slow AI call never
+// leaves later batch members stuck in a claimed state.
+const workerBatchSize = 5
+
 // Service coordinates the full content pipeline.
 type Service struct {
 	cfg        *config.Config
@@ -700,7 +715,7 @@ func (s *Service) fail(ctx context.Context, jobID int64, msg string) error {
 
 // ProcessScoringQueue claims and processes queued scoring work.
 func (s *Service) ProcessScoringQueue(ctx context.Context) error {
-	jobs, err := s.posts.ListByStatus(ctx, post.StatusScoringQueued, 1)
+	jobs, err := s.posts.ListByStatus(ctx, post.StatusScoringQueued, workerBatchSize)
 	if err != nil {
 		return err
 	}
@@ -728,7 +743,7 @@ func (s *Service) ProcessScoringQueue(ctx context.Context) error {
 
 // ProcessVariantQueue claims and processes queued variant generation work.
 func (s *Service) ProcessVariantQueue(ctx context.Context) error {
-	jobs, err := s.posts.ListByStatus(ctx, post.StatusVariantsQueued, 1)
+	jobs, err := s.posts.ListByStatus(ctx, post.StatusVariantsQueued, workerBatchSize)
 	if err != nil {
 		return err
 	}
@@ -888,7 +903,8 @@ func (s *Service) RepairNotifications(ctx context.Context) error {
 		}
 	}
 
-	publishedJobs, err := s.posts.ListRecentByStatus(ctx, post.StatusPublished, 50)
+	terminalSince := time.Now().Add(-repairLookback)
+	publishedJobs, err := s.posts.ListRecentByStatus(ctx, post.StatusPublished, terminalSince, 50)
 	if err != nil {
 		return err
 	}
@@ -901,7 +917,7 @@ func (s *Service) RepairNotifications(ctx context.Context) error {
 			}
 		}
 	}
-	failedJobs, err := s.posts.ListRecentByStatus(ctx, post.StatusFailed, 50)
+	failedJobs, err := s.posts.ListRecentByStatus(ctx, post.StatusFailed, terminalSince, 50)
 	if err != nil {
 		return err
 	}
@@ -910,6 +926,19 @@ func (s *Service) RepairNotifications(ctx context.Context) error {
 			fmt.Sprintf("Job #%d FAILED durumunda: %s", job.ID, job.ErrorMessage), nil); err != nil {
 			s.logger.Error("repair failed notification failed", "job_id", job.ID, "error", err)
 		}
+	}
+	return nil
+}
+
+// PurgeDeliveredNotifications removes delivered outbox rows older than the
+// retention window so the table (and its counts query) stays small.
+func (s *Service) PurgeDeliveredNotifications(ctx context.Context) error {
+	n, err := s.outbox.PurgeSent(ctx, time.Now().Add(-outboxRetention))
+	if err != nil {
+		return err
+	}
+	if n > 0 {
+		s.logger.Info("purged delivered notifications", "count", n)
 	}
 	return nil
 }

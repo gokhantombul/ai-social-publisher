@@ -65,11 +65,17 @@ func (s *Scheduler) Start(ctx context.Context) {
 	})
 
 	s.run(ctx, "notifications", time.Duration(s.cfg.NotificationIntervalSeconds)*time.Second, true, func(ctx context.Context) {
-		if err := s.approval.RepairNotifications(ctx); err != nil {
-			s.logger.Error("notification repair error", "error", err)
-		}
 		if err := s.approval.DeliverNotifications(ctx); err != nil {
 			s.logger.Error("notification delivery error", "error", err)
+		}
+	})
+
+	// Repair closes a crash window that is only seconds wide, so it runs once at
+	// startup and then infrequently; running it on every delivery tick hammered
+	// the database with hundreds of queries per cycle for nothing.
+	s.run(ctx, "notification-repair", 5*time.Minute, true, func(ctx context.Context) {
+		if err := s.approval.RepairNotifications(ctx); err != nil {
+			s.logger.Error("notification repair error", "error", err)
 		}
 	})
 
@@ -86,6 +92,9 @@ func (s *Scheduler) Start(ctx context.Context) {
 			s.logger.Error("media cleanup error", "error", err)
 		} else if removed > 0 {
 			s.logger.Info("expired media removed", "count", removed)
+		}
+		if err := s.approval.PurgeDeliveredNotifications(ctx); err != nil {
+			s.logger.Error("outbox cleanup error", "error", err)
 		}
 	})
 

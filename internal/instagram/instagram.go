@@ -101,8 +101,10 @@ func (p *Publisher) PublishImage(ctx context.Context, req PublishRequest) (*Publ
 	}, nil
 }
 
-func (p *Publisher) graphURL(path string) string {
-	return fmt.Sprintf("%s/%s/%s", strings.TrimRight(p.cfg.GraphBaseURL, "/"), p.cfg.APIVersion, strings.TrimLeft(path, "/"))
+// graphURL builds /<version>/<ig-user-id>/<endpoint>. The user id is
+// path-escaped so a malformed config value cannot alter the request path.
+func (p *Publisher) graphURL(igUserID, endpoint string) string {
+	return fmt.Sprintf("%s/%s/%s/%s", strings.TrimRight(p.cfg.GraphBaseURL, "/"), p.cfg.APIVersion, url.PathEscape(igUserID), endpoint)
 }
 
 func (p *Publisher) createMediaContainer(ctx context.Context, req PublishRequest) (string, error) {
@@ -111,7 +113,7 @@ func (p *Publisher) createMediaContainer(ctx context.Context, req PublishRequest
 	form.Set("caption", req.Caption)
 	form.Set("access_token", p.cfg.AccessToken)
 
-	endpoint := p.graphURL(req.InstagramUserID + "/media")
+	endpoint := p.graphURL(req.InstagramUserID, "media")
 	body, err := p.postForm(ctx, endpoint, form)
 	if err != nil {
 		return "", fmt.Errorf("create media container: %w", err)
@@ -140,7 +142,7 @@ func (p *Publisher) publishMedia(ctx context.Context, igUserID, creationID strin
 	form.Set("creation_id", creationID)
 	form.Set("access_token", p.cfg.AccessToken)
 
-	endpoint := p.graphURL(igUserID + "/media_publish")
+	endpoint := p.graphURL(igUserID, "media_publish")
 	body, err := p.postForm(ctx, endpoint, form)
 	if err != nil {
 		return "", nil, fmt.Errorf("publish media: %w", err)

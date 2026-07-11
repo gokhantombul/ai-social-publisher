@@ -34,7 +34,9 @@ services:
       TGPT_COMMAND: ${TGPT_COMMAND:-tgpt}
       OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
       OLLAMA_MODEL: ${OLLAMA_MODEL:-llama3.1:8b}
-      INSTAGRAM_ACCESS_TOKEN: ${INSTAGRAM_ACCESS_TOKEN:-changeme}
+      # Empty by default: config validation requires a real token only when
+      # Instagram publishing is enabled, and a placeholder must never pass it.
+      INSTAGRAM_ACCESS_TOKEN: ${INSTAGRAM_ACCESS_TOKEN:-}
       IG_TECH_USER_ID: ${IG_TECH_USER_ID:-0}
       IG_CINEMA_USER_ID: ${IG_CINEMA_USER_ID:-0}
       IG_NEWS_USER_ID: ${IG_NEWS_USER_ID:-0}
@@ -54,6 +56,12 @@ services:
       - "host.docker.internal:host-gateway"
     security_opt:
       - no-new-privileges:true
+    cap_drop:
+      - ALL
+    # The app only writes rendered media (uploads volume) and /tmp scratch.
+    read_only: true
+    tmpfs:
+      - /tmp
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "-", "http://localhost:8080/ready"]
       interval: 10s
