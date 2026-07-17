@@ -287,26 +287,44 @@ func (r *Repository) QueueVariants(ctx context.Context, id int64, count int) err
 	})
 }
 
-// SelectVariant records the chosen variant and moves to READY_TO_PUBLISH.
+// SelectVariant records the chosen variant and moves to READY_TO_PUBLISH. It
+// requires the job to be exactly WAITING_VARIANT_APPROVAL inside the
+// transaction: the generic transition table also allows SCHEDULED ->
+// READY_TO_PUBLISH (for schedule cancellation), and accepting it here would let
+// a concurrent select silently cancel an operator's schedule.
 func (r *Repository) SelectVariant(ctx context.Context, id, variantID int64) error {
-	return r.transition(ctx, id, StatusReadyToPublish, func(tx *sql.Tx) error {
-		result, err := tx.ExecContext(ctx,
-			`UPDATE post_jobs SET selected_variant_id = $1
-			 WHERE id = $2 AND EXISTS (
-				 SELECT 1 FROM post_variants WHERE id = $1 AND post_job_id = $2
-			 )`, variantID, id)
-		if err != nil {
-			return err
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	var current Status
+	if err := tx.QueryRowContext(ctx, `SELECT status FROM post_jobs WHERE id = $1 FOR UPDATE`, id).Scan(&current); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrNotFound
 		}
-		n, err := result.RowsAffected()
-		if err != nil {
-			return err
-		}
-		if n != 1 {
-			return fmt.Errorf("%w: variant does not belong to job", ErrNotFound)
-		}
-		return nil
-	})
+		return err
+	}
+	if current != StatusWaitingVariantApproval {
+		return fmt.Errorf("%w: cannot select variant in %s", ErrInvalidTransition, current)
+	}
+	result, err := tx.ExecContext(ctx,
+		`UPDATE post_jobs SET status = $3, selected_variant_id = $1, updated_at = now()
+		 WHERE id = $2 AND EXISTS (
+			 SELECT 1 FROM post_variants WHERE id = $1 AND post_job_id = $2
+		 )`, variantID, id, StatusReadyToPublish)
+	if err != nil {
+		return err
+	}
+	n, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n != 1 {
+		return fmt.Errorf("%w: variant does not belong to job", ErrNotFound)
+	}
+	return tx.Commit()
 }
 
 // ReselectVariant changes the selected variant while a job is still under

@@ -651,6 +651,12 @@ func (s *Service) PublishJob(ctx context.Context, jobID int64) error {
 		return fmt.Errorf("%w: cannot claim %s for publishing", post.ErrInvalidTransition, current.Status)
 	}
 
+	// From here the job performs a non-idempotent external side effect. Detach
+	// from the caller's cancellation (graceful shutdown must not abort a publish
+	// mid-flight and strand it as FAILED) but keep a hard upper bound.
+	ctx, cancelPublish := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Minute)
+	defer cancelPublish()
+
 	variant, err := s.posts.GetVariantByID(ctx, job.SelectedVariantID.Int64)
 	if err != nil {
 		return s.fail(ctx, jobID, fmt.Sprintf("load variant: %v", err))

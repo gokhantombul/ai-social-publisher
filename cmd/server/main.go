@@ -187,6 +187,10 @@ func serve(cfg *config.Config, db *sql.DB, logger *slog.Logger) error {
 
 	select {
 	case err := <-serverErr:
+		// Listen failed: stop the background workers and drain them before
+		// exiting so in-flight work is not killed mid-write.
+		stop()
+		sched.Wait()
 		return err
 	case <-ctx.Done():
 		logger.Info("shutdown signal received")
