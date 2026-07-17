@@ -1,16 +1,18 @@
-
-!/storage/uploads/.gitkeep
 # Binaries
-# Generated / uploaded media (kept dir via .gitkeep)
-# Go
-# Local config / secrets
-*.out
-*.test
-.env
 /bin/
-/storage/uploads/*
 /tmp/
 ai-social-publisher
+
+# Local config / secrets
 config.yaml
+.env
 cookies.txt
+
+# Generated / uploaded media (kept dir via .gitkeep)
+/storage/uploads/*
+!/storage/uploads/.gitkeep
+
+# Go
+*.test
+*.out
 vendor/
