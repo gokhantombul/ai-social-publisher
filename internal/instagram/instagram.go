@@ -89,7 +89,13 @@ func (p *Publisher) PublishImage(ctx context.Context, req PublishRequest) (*Publ
 	// Step 2: publish the container.
 	mediaID, respBody, err := p.publishMedia(ctx, req.InstagramUserID, creationID)
 	if err != nil {
-		return nil, err
+		// Surface the dumps alongside the error so the publish failure log
+		// records what the Graph API actually answered.
+		return &PublishResult{
+			CreationID:   creationID,
+			RequestDump:  reqDump,
+			ResponseDump: respBody,
+		}, err
 	}
 
 	return &PublishResult{
@@ -190,9 +196,12 @@ func (p *Publisher) postForm(ctx context.Context, endpoint string, form url.Valu
 	return body, nil
 }
 
+// truncateBody bounds an error body and guarantees valid UTF-8: the result is
+// persisted into publish_logs/error_message columns, and Postgres rejects
+// invalid byte sequences.
 func truncateBody(body []byte, limit int) string {
 	if len(body) > limit {
 		body = body[:limit]
 	}
-	return strings.TrimSpace(string(body))
+	return strings.ToValidUTF8(strings.TrimSpace(string(body)), "�")
 }

@@ -5,10 +5,10 @@ go 1.26
 toolchain go1.26.5
 
 require (
-	github.com/go-chi/chi/v5 v5.1.0
-	github.com/jackc/pgx/v5 v5.9.2
-	github.com/pressly/goose/v3 v3.24.1
-	golang.org/x/image v0.42.0
+	github.com/go-chi/chi/v5 v5.3.1
+	github.com/jackc/pgx/v5 v5.10.0
+	github.com/pressly/goose/v3 v3.24.3
+	golang.org/x/image v0.44.0
 	gopkg.in/yaml.v3 v3.0.1
 )
 
@@ -21,7 +21,7 @@ require (
 	github.com/rogpeppe/go-internal v1.15.0 // indirect
 	github.com/sethvargo/go-retry v0.3.0 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
-	golang.org/x/sync v0.21.0 // indirect
+	golang.org/x/sync v0.22.0 // indirect
 	golang.org/x/sys v0.45.0 // indirect
-	golang.org/x/text v0.38.0 // indirect
+	golang.org/x/text v0.40.0 // indirect
 )

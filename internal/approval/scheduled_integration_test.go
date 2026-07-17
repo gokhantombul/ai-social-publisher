@@ -2,6 +2,7 @@ package approval_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -160,6 +161,16 @@ func TestScheduledPublishWorkflow(t *testing.T) {
 	stillScheduled, err := postRepo.GetByID(ctx, job.ID)
 	if err != nil || stillScheduled.Status != post.StatusScheduled {
 		t.Fatalf("future schedule must not publish early, got %+v err=%v", stillScheduled, err)
+	}
+
+	// A stale Telegram variant-select (or replayed callback) must not cancel the
+	// schedule and publish immediately.
+	if err := service.SelectVariantForJob(ctx, job.ID, variants[1].ID); !errors.Is(err, post.ErrInvalidTransition) {
+		t.Fatalf("variant select on a scheduled job should be rejected, got %v", err)
+	}
+	guarded, err := postRepo.GetByID(ctx, job.ID)
+	if err != nil || guarded.Status != post.StatusScheduled {
+		t.Fatalf("job must stay SCHEDULED after rejected select, got %+v err=%v", guarded, err)
 	}
 
 	// Rejecting a past time is a client error, not a state change.

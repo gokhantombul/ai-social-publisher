@@ -379,15 +379,19 @@ func (r *Repository) UpdateVariantCaption(ctx context.Context, jobID, variantID 
 }
 
 // ListStaleProcessing returns jobs left in an in-progress state beyond cutoff.
+// NEW and SCORED are included because their advancement happens in a separate
+// write from the one that created them: a crash between the two would otherwise
+// strand the job forever, since candidate dedupe prevents SyncNews from ever
+// re-processing it.
 func (r *Repository) ListStaleProcessing(ctx context.Context, cutoff time.Time, limit int) ([]Job, error) {
 	if limit <= 0 || limit > 200 {
 		limit = 50
 	}
 	q := `SELECT ` + jobColumns + `
 FROM post_jobs
-WHERE status IN ($1, $2, $3) AND updated_at < $4
-ORDER BY updated_at ASC LIMIT $5`
-	rows, err := r.db.QueryContext(ctx, q, StatusScoring, StatusGeneratingVariants, StatusPublishing, cutoff, limit)
+WHERE status IN ($1, $2, $3, $4, $5) AND updated_at < $6
+ORDER BY updated_at ASC LIMIT $7`
+	rows, err := r.db.QueryContext(ctx, q, StatusNew, StatusScored, StatusScoring, StatusGeneratingVariants, StatusPublishing, cutoff, limit)
 	if err != nil {
 		return nil, err
 	}

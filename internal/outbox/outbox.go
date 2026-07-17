@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"ai-social-publisher/internal/telegram"
@@ -40,9 +41,17 @@ ON CONFLICT (dedupe_key) DO NOTHING`, dedupeKey, payload)
 	return err
 }
 
-// ClaimDue leases one due message. SKIP LOCKED permits multiple application
-// instances without duplicate delivery.
-func (r *Repository) ClaimDue(ctx context.Context) (*Message, error) {
+// minLease is the floor for delivery leases: the lease must comfortably outlast
+// one delivery attempt or a second worker could claim (and re-send) a message
+// still in flight.
+const minLease = time.Minute
+
+// ClaimDue leases one due message for at least lease (clamped up to minLease).
+// SKIP LOCKED permits multiple application instances without duplicate delivery.
+func (r *Repository) ClaimDue(ctx context.Context, lease time.Duration) (*Message, error) {
+	if lease < minLease {
+		lease = minLease
+	}
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, err
@@ -77,8 +86,8 @@ LIMIT 1`).Scan(&m.ID, &payload, &m.Attempts)
 	}
 	if _, err := tx.ExecContext(ctx, `
 UPDATE notification_outbox
-SET locked_until = now() + interval '1 minute', attempts = attempts + 1
-WHERE id = $1`, m.ID); err != nil {
+SET locked_until = now() + make_interval(secs => $2), attempts = attempts + 1
+WHERE id = $1`, m.ID, lease.Seconds()); err != nil {
 		return nil, err
 	}
 	m.Attempts++
@@ -101,6 +110,9 @@ func (r *Repository) MarkFailed(ctx context.Context, id int64, attempts int, del
 	if len(msg) > 1000 {
 		msg = msg[:1000]
 	}
+	// Byte-level truncation can split a UTF-8 sequence; Postgres rejects invalid
+	// UTF-8, which would make this bookkeeping write itself fail forever.
+	msg = strings.ToValidUTF8(msg, "�")
 	if attempts >= maxAttempts {
 		_, err := r.db.ExecContext(ctx, `
 UPDATE notification_outbox

@@ -98,6 +98,12 @@ func normalizeVariants(in []PostVariant) []PostVariant {
 		if len([]rune(v.Caption)) > 2200 {
 			continue
 		}
+		// The style is model-produced free text; bound it before it reaches the
+		// database and rendered card.
+		v.Style = strings.TrimSpace(v.Style)
+		if runes := []rune(v.Style); len(runes) > 100 {
+			v.Style = string(runes[:100])
+		}
 		v.VariantNo = len(out) + 1
 		out = append(out, v)
 	}

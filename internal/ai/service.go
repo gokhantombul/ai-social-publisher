@@ -70,8 +70,14 @@ func (s *Service) GeneratePostVariants(ctx context.Context, req GeneratePostVari
 			s.logger.Warn("provider returned zero variants, trying next", "provider", p.Name())
 			continue
 		}
+		if len(variants) > req.VariantCount {
+			// Models occasionally over-deliver; keeping the first N is better than
+			// discarding an otherwise valid response.
+			s.logger.Warn("provider returned extra variants, truncating", "provider", p.Name(), "got", len(variants), "want", req.VariantCount)
+			variants = variants[:req.VariantCount]
+		}
 		if len(variants) != req.VariantCount {
-			s.logger.Warn("provider returned wrong variant count", "provider", p.Name(), "got", len(variants), "want", req.VariantCount)
+			s.logger.Warn("provider returned too few variants", "provider", p.Name(), "got", len(variants), "want", req.VariantCount)
 			continue
 		}
 		return &VariantsResult{Variants: variants, Provider: p.Name(), Model: modelOf(p)}, nil

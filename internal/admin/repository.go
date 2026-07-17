@@ -78,8 +78,7 @@ type JobPage struct {
 	Page  PageInfo
 }
 
-const jobSelect = `
-SELECT j.id, j.news_candidate_id, j.social_account_id, j.status, j.requested_variant_count,
+const jobViewColumns = `j.id, j.news_candidate_id, j.social_account_id, j.status, j.requested_variant_count,
        j.selected_variant_id, j.instagram_media_id, j.ai_provider, j.ai_model, j.ai_error,
        j.error_message, j.ai_retry_count, j.next_ai_retry_at, j.created_at, j.updated_at,
        j.scheduled_publish_at,
@@ -87,11 +86,16 @@ SELECT j.id, j.news_candidate_id, j.social_account_id, j.status, j.requested_var
        a.code, a.name, a.instagram_user_id, a.variant_count, a.notify_threshold, a.is_active,
        (s.id IS NOT NULL), COALESCE(s.importance_score, 0), COALESCE(s.virality_score, 0),
        COALESCE(s.account_fit, ''), COALESCE(s.should_notify, FALSE), COALESCE(s.risk_level, ''),
-       COALESCE(s.reason, '')
+       COALESCE(s.reason, '')`
+
+const jobViewFrom = `
 FROM post_jobs j
 JOIN news_candidates c ON c.id = j.news_candidate_id
 JOIN social_accounts a ON a.id = j.social_account_id
 LEFT JOIN news_scores s ON s.news_candidate_id = c.id`
+
+const jobSelect = `
+SELECT ` + jobViewColumns + jobViewFrom
 
 func (r *Repository) GetJob(ctx context.Context, id int64) (*JobView, error) {
 	row := r.db.QueryRowContext(ctx, jobSelect+` WHERE j.id = $1`, id)
@@ -110,24 +114,20 @@ func (r *Repository) ListJobs(ctx context.Context, f JobFilters) (JobPage, error
 		f.Page = 1
 	}
 	where, args := jobWhere(f)
-	var total int
-	countQuery := `SELECT COUNT(*) FROM post_jobs j
-JOIN news_candidates c ON c.id = j.news_candidate_id
-JOIN social_accounts a ON a.id = j.social_account_id ` + where
-	if err := r.db.QueryRowContext(ctx, countQuery, args...).Scan(&total); err != nil {
-		return JobPage{}, err
-	}
-
+	// COUNT(*) OVER() evaluates before LIMIT/OFFSET, folding the page and the
+	// total into one scan instead of running the filter (which may be an
+	// unindexable ILIKE) twice per page view.
 	args = append(args, pageSize, (f.Page-1)*pageSize)
-	query := jobSelect + ` ` + where + fmt.Sprintf(` ORDER BY j.updated_at DESC, j.id DESC LIMIT $%d OFFSET $%d`, len(args)-1, len(args))
+	query := `SELECT ` + jobViewColumns + `, COUNT(*) OVER()` + jobViewFrom + ` ` + where + fmt.Sprintf(` ORDER BY j.updated_at DESC, j.id DESC LIMIT $%d OFFSET $%d`, len(args)-1, len(args))
 	rows, err := r.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return JobPage{}, err
 	}
 	defer rows.Close()
+	var total int
 	items := make([]JobView, 0, pageSize)
 	for rows.Next() {
-		v, err := scanJobView(rows)
+		v, err := scanJobView(rows, &total)
 		if err != nil {
 			return JobPage{}, err
 		}
@@ -135,6 +135,16 @@ JOIN social_accounts a ON a.id = j.social_account_id ` + where
 	}
 	if err := rows.Err(); err != nil {
 		return JobPage{}, err
+	}
+	if len(items) == 0 && f.Page > 1 {
+		// Past the last page there are no rows to carry the window total; fall
+		// back to a count so pagination links stay accurate.
+		countQuery := `SELECT COUNT(*) FROM post_jobs j
+JOIN news_candidates c ON c.id = j.news_candidate_id
+JOIN social_accounts a ON a.id = j.social_account_id ` + where
+		if err := r.db.QueryRowContext(ctx, countQuery, args[:len(args)-2]...).Scan(&total); err != nil {
+			return JobPage{}, err
+		}
 	}
 	return JobPage{Items: items, Page: makePage(f.Page, total)}, nil
 }
@@ -227,14 +237,12 @@ func (r *Repository) ListNews(ctx context.Context, f NewsFilters) (NewsPage, err
 		clauses = append(clauses, fmt.Sprintf("(c.title ILIKE $%d OR c.summary ILIKE $%d OR c.source ILIKE $%d)", n, n, n))
 	}
 	where := "WHERE " + strings.Join(clauses, " AND ")
-	var total int
-	if err := r.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM news_candidates c `+where, args...).Scan(&total); err != nil {
-		return NewsPage{}, err
-	}
+	// One scan returns the page and, via COUNT(*) OVER(), the filtered total.
 	args = append(args, pageSize, (f.Page-1)*pageSize)
 	query := `SELECT c.id, c.title, c.summary, c.source, c.source_url, c.category, c.published_at, c.created_at,
        (s.id IS NOT NULL), COALESCE(s.importance_score, 0), COALESCE(s.virality_score, 0),
-       COALESCE(s.risk_level, ''), COALESCE(s.reason, ''), j.id, COALESCE(j.status, '')
+       COALESCE(s.risk_level, ''), COALESCE(s.reason, ''), j.id, COALESCE(j.status, ''),
+       COUNT(*) OVER()
 FROM news_candidates c
 LEFT JOIN news_scores s ON s.news_candidate_id = c.id
 LEFT JOIN LATERAL (
@@ -248,18 +256,26 @@ LEFT JOIN LATERAL (
 		return NewsPage{}, err
 	}
 	defer rows.Close()
+	var total int
 	items := make([]NewsView, 0, pageSize)
 	for rows.Next() {
 		var v NewsView
 		if err := rows.Scan(&v.ID, &v.Title, &v.Summary, &v.Source, &v.SourceURL, &v.Category,
 			&v.PublishedAt, &v.CreatedAt, &v.HasScore, &v.ImportanceScore, &v.ViralityScore,
-			&v.RiskLevel, &v.ScoreReason, &v.JobID, &v.JobStatus); err != nil {
+			&v.RiskLevel, &v.ScoreReason, &v.JobID, &v.JobStatus, &total); err != nil {
 			return NewsPage{}, err
 		}
 		items = append(items, v)
 	}
 	if err := rows.Err(); err != nil {
 		return NewsPage{}, err
+	}
+	if len(items) == 0 && f.Page > 1 {
+		// Past the last page there are no rows to carry the window total; fall
+		// back to a count so pagination links stay accurate.
+		if err := r.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM news_candidates c `+where, args[:len(args)-2]...).Scan(&total); err != nil {
+			return NewsPage{}, err
+		}
 	}
 	return NewsPage{Items: items, Page: makePage(f.Page, total)}, nil
 }
@@ -274,9 +290,11 @@ func makePage(page, total int) PageInfo {
 
 type scanner interface{ Scan(...any) error }
 
-func scanJobView(s scanner) (JobView, error) {
+// scanJobView scans one jobViewColumns row; extra receives any additional
+// trailing columns (e.g. a COUNT(*) OVER() total).
+func scanJobView(s scanner, extra ...any) (JobView, error) {
 	var v JobView
-	err := s.Scan(
+	dest := []any{
 		&v.ID, &v.NewsCandidateID, &v.SocialAccountID, &v.Status, &v.RequestedVariantCount,
 		&v.SelectedVariantID, &v.InstagramMediaID, &v.AIProvider, &v.AIModel, &v.AIError,
 		&v.ErrorMessage, &v.AIRetryCount, &v.NextAIRetryAt, &v.CreatedAt, &v.UpdatedAt,
@@ -285,6 +303,7 @@ func scanJobView(s scanner) (JobView, error) {
 		&v.AccountCode, &v.AccountName, &v.InstagramUserID, &v.VariantCount, &v.NotifyThreshold, &v.AccountActive,
 		&v.HasScore, &v.ImportanceScore, &v.ViralityScore, &v.AccountFit, &v.ShouldNotify,
 		&v.RiskLevel, &v.ScoreReason,
-	)
+	}
+	err := s.Scan(append(dest, extra...)...)
 	return v, err
 }

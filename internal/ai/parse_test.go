@@ -75,3 +75,17 @@ func TestParseScoreRejectsUnknownEnums(t *testing.T) {
 		t.Fatal("expected invalid enum error")
 	}
 }
+
+func TestNormalizeVariantsBoundsStyle(t *testing.T) {
+	long := make([]rune, 300)
+	for i := range long {
+		long[i] = 'x'
+	}
+	vs, err := parseVariants(`{"variants":[{"style":"  ` + string(long) + `  ","caption":"c1"}]}`)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := len([]rune(vs[0].Style)); got != 100 {
+		t.Fatalf("expected style truncated to 100 runes, got %d", got)
+	}
+}

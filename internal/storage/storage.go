@@ -119,23 +119,33 @@ func copyFile(src, dst string) error {
 	return nil
 }
 
-// Cleanup removes generated regular files older than cutoff. Symlinks and
-// directories are never followed or removed.
+// tempUploadMaxAge is how long an .upload-* temp file may exist before Cleanup
+// treats it as orphaned by a crashed copy. A healthy copy completes in seconds.
+const tempUploadMaxAge = time.Hour
+
+// Cleanup removes generated regular files older than cutoff, plus .upload-*
+// temp files orphaned by an interrupted copy. Symlinks and directories are
+// never followed or removed.
 func (s *LocalStorage) Cleanup(ctx context.Context, cutoff time.Time) (int, error) {
 	entries, err := os.ReadDir(s.baseDir)
 	if err != nil {
 		return 0, err
 	}
 	removed := 0
+	tempCutoff := time.Now().Add(-tempUploadMaxAge)
 	for _, entry := range entries {
 		if err := ctx.Err(); err != nil {
 			return removed, err
 		}
+		expiry := cutoff
 		if strings.HasPrefix(entry.Name(), ".") {
-			continue
+			if !strings.HasPrefix(entry.Name(), ".upload-") {
+				continue
+			}
+			expiry = tempCutoff
 		}
 		info, err := entry.Info()
-		if err != nil || !info.Mode().IsRegular() || !info.ModTime().Before(cutoff) {
+		if err != nil || !info.Mode().IsRegular() || !info.ModTime().Before(expiry) {
 			continue
 		}
 		if err := os.Remove(filepath.Join(s.baseDir, entry.Name())); err != nil {

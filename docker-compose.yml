@@ -48,7 +48,9 @@ services:
       TELEGRAM_CALLBACK_SECRET: ${TELEGRAM_CALLBACK_SECRET:?TELEGRAM_CALLBACK_SECRET is required}
       TELEGRAM_ALLOWED_USER: ${TELEGRAM_ALLOWED_USER:?TELEGRAM_ALLOWED_USER is required}
     ports:
-      - "8080:8080"
+      # Loopback-only by default: the console speaks plain HTTP with token auth,
+      # so exposing it beyond the host requires an explicit opt-in.
+      - "${APP_BIND_ADDR:-127.0.0.1}:8080:8080"
     command: ["serve", "--config", "/app/config.example.yaml"]
     volumes:
       - uploads:/app/storage/uploads

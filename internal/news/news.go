@@ -53,7 +53,9 @@ func NewRepository(db *sql.DB) *Repository {
 
 // Upsert inserts a candidate, ignoring duplicates by external_news_id. The
 // returned bool reports whether a new row was created (true) or it already
-// existed (false). This is the duplicate-control mechanism.
+// existed (false). This is the duplicate-control mechanism. On a duplicate the
+// candidate is nil: sync discards duplicates anyway, and skipping the extra
+// lookup saves a round trip per already-seen item on every sync.
 func (r *Repository) Upsert(ctx context.Context, c Candidate) (*Candidate, bool, error) {
 	const q = `
 INSERT INTO news_candidates (external_news_id, title, summary, source, source_url, category, published_at, raw_payload)
@@ -66,12 +68,7 @@ RETURNING id, external_news_id, title, summary, source, source_url, category, pu
 
 	created, err := scanCandidate(row)
 	if errors.Is(err, sql.ErrNoRows) {
-		// Conflict: row already exists. Fetch the existing one.
-		existing, gerr := r.GetByExternalID(ctx, c.ExternalNewsID)
-		if gerr != nil {
-			return nil, false, gerr
-		}
-		return existing, false, nil
+		return nil, false, nil
 	}
 	if err != nil {
 		return nil, false, err

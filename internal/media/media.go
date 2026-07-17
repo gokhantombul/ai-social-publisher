@@ -55,13 +55,14 @@ const (
 	margin     = 80
 )
 
-// TemplateRenderer draws cards as PNG files into outputDir.
+// TemplateRenderer draws cards as PNG files into outputDir. It keeps only the
+// parsed fonts: an opentype.Face is not safe for concurrent use, so faces are
+// created per render (an HTTP preview and a scheduled publish may render at the
+// same time).
 type TemplateRenderer struct {
 	outputDir string
-	labelFace font.Face
-	titleFace font.Face
-	bodyFace  font.Face
-	metaFace  font.Face
+	regular   *opentype.Font
+	bold      *opentype.Font
 }
 
 // NewTemplateRenderer ensures the output directory exists.
@@ -77,32 +78,46 @@ func NewTemplateRenderer(outputDir string) (*TemplateRenderer, error) {
 	if err != nil {
 		return nil, fmt.Errorf("parse bold font: %w", err)
 	}
+	return &TemplateRenderer{outputDir: outputDir, regular: regular, bold: bold}, nil
+}
+
+// faces holds the per-render font faces.
+type faces struct {
+	label font.Face
+	title font.Face
+	body  font.Face
+	meta  font.Face
+}
+
+func (r *TemplateRenderer) newFaces() (faces, error) {
 	newFace := func(parsed *opentype.Font, size float64) (font.Face, error) {
 		return opentype.NewFace(parsed, &opentype.FaceOptions{Size: size, DPI: 72, Hinting: font.HintingFull})
 	}
-	labelFace, err := newFace(bold, 42)
-	if err != nil {
-		return nil, err
+	var f faces
+	var err error
+	if f.label, err = newFace(r.bold, 42); err != nil {
+		return faces{}, err
 	}
-	titleFace, err := newFace(bold, 52)
-	if err != nil {
-		return nil, err
+	if f.title, err = newFace(r.bold, 52); err != nil {
+		return faces{}, err
 	}
-	bodyFace, err := newFace(regular, 32)
-	if err != nil {
-		return nil, err
+	if f.body, err = newFace(r.regular, 32); err != nil {
+		return faces{}, err
 	}
-	metaFace, err := newFace(regular, 25)
-	if err != nil {
-		return nil, err
+	if f.meta, err = newFace(r.regular, 25); err != nil {
+		return faces{}, err
 	}
-	return &TemplateRenderer{outputDir: outputDir, labelFace: labelFace, titleFace: titleFace, bodyFace: bodyFace, metaFace: metaFace}, nil
+	return f, nil
 }
 
 // RenderPostImage produces a 1080x1080 PNG card and returns its local path.
 func (r *TemplateRenderer) RenderPostImage(ctx context.Context, variant post.Variant, news ai.NewsCandidate, acct account.Account) (*RenderedMedia, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
+	}
+	fc, err := r.newFaces()
+	if err != nil {
+		return nil, fmt.Errorf("prepare fonts: %w", err)
 	}
 	th, ok := themes[acct.Category]
 	if !ok {
@@ -121,12 +136,12 @@ func (r *TemplateRenderer) RenderPostImage(ctx context.Context, variant post.Var
 
 	y := 140
 	// Category label.
-	drawText(img, th.label, margin, y, accent, r.labelFace)
+	drawText(img, th.label, margin, y, accent, fc.label)
 	y += 90
 
 	// Headline (wrapped).
 	for _, line := range wrap(news.Title, 34) {
-		drawText(img, line, margin, y, white, r.titleFace)
+		drawText(img, line, margin, y, white, fc.title)
 		y += 64
 		if y > canvasSize-360 {
 			break
@@ -137,7 +152,7 @@ func (r *TemplateRenderer) RenderPostImage(ctx context.Context, variant post.Var
 	// Short punchy sub-text from the caption's first line.
 	sub := firstLine(variant.Caption)
 	for _, line := range wrap(sub, 46) {
-		drawText(img, line, margin, y, muted, r.bodyFace)
+		drawText(img, line, margin, y, muted, fc.body)
 		y += 43
 		if y > canvasSize-200 {
 			break
@@ -151,7 +166,7 @@ func (r *TemplateRenderer) RenderPostImage(ctx context.Context, variant post.Var
 		date = time.Now()
 	}
 	footer = strings.TrimSpace(footer + "  -  " + date.Format("02.01.2006"))
-	drawText(img, footer, margin, canvasSize-margin, muted, r.metaFace)
+	drawText(img, footer, margin, canvasSize-margin, muted, fc.meta)
 
 	// Optional logo area placeholder (top-right box).
 	logoBox := image.Rect(canvasSize-margin-120, 60, canvasSize-margin, 180)
@@ -170,11 +185,16 @@ func (r *TemplateRenderer) RenderPostImage(ctx context.Context, variant post.Var
 	if err != nil {
 		return nil, fmt.Errorf("create image file: %w", err)
 	}
-	defer f.Close()
-
 	if err := png.Encode(f, img); err != nil {
+		_ = f.Close()
 		_ = os.Remove(outPath)
 		return nil, fmt.Errorf("encode png: %w", err)
+	}
+	// A failed close can mean unflushed data (e.g. disk full); a truncated file
+	// must never be reported as a successful render.
+	if err := f.Close(); err != nil {
+		_ = os.Remove(outPath)
+		return nil, fmt.Errorf("close image file: %w", err)
 	}
 
 	return &RenderedMedia{LocalPath: outPath, MimeType: "image/png"}, nil

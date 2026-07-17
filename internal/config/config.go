@@ -301,8 +301,14 @@ func (c *Config) validate() error {
 	if err != nil || databaseURL.Host == "" || (databaseURL.Scheme != "postgres" && databaseURL.Scheme != "postgresql") {
 		return fmt.Errorf("database.url must be a valid postgres URL")
 	}
-	if c.App.Env == "production" && strings.EqualFold(databaseURL.Query().Get("sslmode"), "disable") {
-		return fmt.Errorf("database.url must not disable TLS in production")
+	if c.App.Env == "production" {
+		// The driver's default sslmode silently falls back to cleartext when the
+		// server lacks TLS, so production must opt in to an enforcing mode.
+		switch strings.ToLower(databaseURL.Query().Get("sslmode")) {
+		case "require", "verify-ca", "verify-full":
+		default:
+			return fmt.Errorf("database.url must set sslmode=require, verify-ca or verify-full in production")
+		}
 	}
 	if len(c.Accounts) == 0 {
 		return fmt.Errorf("at least one account must be configured")
@@ -322,6 +328,13 @@ func (c *Config) validate() error {
 	if c.Scheduler.NewsSyncIntervalMinutes < 1 || c.Scheduler.WaitingAIRetryIntervalMinutes < 1 || c.Scheduler.PublishIntervalMinutes < 1 ||
 		c.Scheduler.WorkIntervalSeconds < 1 || c.Scheduler.NotificationIntervalSeconds < 1 || c.Scheduler.StaleJobTimeoutMinutes < 1 {
 		return fmt.Errorf("scheduler intervals must be positive")
+	}
+	// Stale-job recovery assumes an in-progress worker never outlives the stale
+	// cutoff. A worker attempt is bounded by trying every AI provider once, so
+	// the cutoff must exceed the combined provider timeouts or recovery could
+	// requeue work a slow-but-alive worker later completes (duplicate effects).
+	if aiWorstSeconds := c.AI.Providers.Tgpt.TimeoutSeconds + c.AI.Providers.Ollama.TimeoutSeconds; c.Scheduler.StaleJobTimeoutMinutes*60 <= aiWorstSeconds {
+		return fmt.Errorf("scheduler.stale_job_timeout_minutes (%d) must exceed the combined AI provider timeouts (%ds)", c.Scheduler.StaleJobTimeoutMinutes, aiWorstSeconds)
 	}
 	requireServiceHTTPS := c.App.Env == "production"
 	if err := validateHTTPURL("news_service.base_url", c.NewsService.BaseURL, requireServiceHTTPS); err != nil {
@@ -363,6 +376,19 @@ func (c *Config) validate() error {
 	}
 	if len(c.Security.TelegramCallbackSecret) < 32 {
 		return fmt.Errorf("security.telegram_callback_secret must be at least 32 characters")
+	}
+	// The published example placeholders satisfy the length checks, so an
+	// unedited .env would otherwise boot with publicly known credentials.
+	for name, value := range map[string]string{
+		"security.api_token":                c.Security.APIToken,
+		"security.telegram_callback_secret": c.Security.TelegramCallbackSecret,
+		"news_service.auth_token":           c.NewsService.AuthToken,
+		"telegram_service.auth_token":       c.TelegramService.AuthToken,
+		"instagram.access_token":            c.Instagram.AccessToken,
+	} {
+		if isPlaceholderSecret(value) {
+			return fmt.Errorf("%s still uses an example placeholder value; generate a real secret (e.g. `openssl rand -hex 32`)", name)
+		}
 	}
 	if len(c.Security.AllowedTelegramUsers) == 0 {
 		return fmt.Errorf("security.allowed_telegram_users must contain at least one user")
@@ -433,6 +459,13 @@ func (c *Config) validate() error {
 		}
 	}
 	return nil
+}
+
+// isPlaceholderSecret reports whether a secret still carries a marker used by
+// the shipped example files (.env.example, config.example.yaml).
+func isPlaceholderSecret(value string) bool {
+	l := strings.ToLower(value)
+	return strings.Contains(l, "replace-with") || strings.Contains(l, "changeme") || strings.Contains(l, "change-me")
 }
 
 func validateHTTPURL(name, raw string, requireHTTPS bool) error {

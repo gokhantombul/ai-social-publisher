@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 
 	"ai-social-publisher/internal/config"
 )
@@ -93,9 +94,12 @@ func (c *Client) Send(ctx context.Context, n Notification) error {
 	return nil
 }
 
+// truncateResponse bounds an error body and guarantees valid UTF-8: the result
+// ends up in error messages persisted to Postgres, which rejects invalid byte
+// sequences and would otherwise wedge outbox bookkeeping.
 func truncateResponse(body []byte, limit int) string {
 	if len(body) > limit {
 		body = body[:limit]
 	}
-	return string(body)
+	return strings.ToValidUTF8(string(body), "�")
 }

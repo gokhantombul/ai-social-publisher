@@ -161,3 +161,77 @@ func TestExampleConfigOnlyReferencesDocumentedEnvironmentVariables(t *testing.T)
 		}
 	}
 }
+
+func TestValidateRejectsPlaceholderSecrets(t *testing.T) {
+	yaml := `
+app:
+  public_base_url: "http://localhost:8080/static"
+database:
+  url: "postgres://localhost/test"
+news_service:
+  base_url: "http://localhost:9001"
+  auth_token: "12345678901234567890123456789012"
+  categories: ["technology"]
+telegram_service:
+  base_url: "http://localhost:9002"
+  auth_token: "12345678901234567890123456789012"
+ai:
+  providers:
+    tgpt:
+      enabled: true
+security:
+  api_token: "replace-with-a-random-api-token-32-chars"
+  telegram_callback_secret: "12345678901234567890123456789012"
+  allowed_telegram_users: ["tester"]
+accounts:
+  - code: "tech"
+    category: "technology"
+`
+	_, err := Load(writeTemp(t, yaml))
+	if err == nil || !strings.Contains(err.Error(), "placeholder") {
+		t.Fatalf("expected placeholder secret rejection, got %v", err)
+	}
+}
+
+func TestProductionRequiresEnforcedDatabaseTLS(t *testing.T) {
+	base := `
+app:
+  env: "production"
+  public_base_url: "https://example.com/static"
+database:
+  url: "%s"
+news_service:
+  base_url: "https://news.example.com"
+  auth_token: "12345678901234567890123456789012"
+  categories: ["technology"]
+telegram_service:
+  base_url: "https://tg.example.com"
+  auth_token: "12345678901234567890123456789012"
+ai:
+  providers:
+    tgpt:
+      enabled: true
+security:
+  api_token: "12345678901234567890123456789012"
+  telegram_callback_secret: "12345678901234567890123456789012"
+  allowed_telegram_users: ["tester"]
+accounts:
+  - code: "tech"
+    category: "technology"
+`
+	for url, wantErr := range map[string]bool{
+		"postgres://db.example.com/app":                     true,
+		"postgres://db.example.com/app?sslmode=disable":     true,
+		"postgres://db.example.com/app?sslmode=prefer":      true,
+		"postgres://db.example.com/app?sslmode=require":     false,
+		"postgres://db.example.com/app?sslmode=verify-full": false,
+	} {
+		_, err := Load(writeTemp(t, strings.ReplaceAll(base, "%s", url)))
+		if wantErr && (err == nil || !strings.Contains(err.Error(), "sslmode")) {
+			t.Errorf("%s: expected sslmode error, got %v", url, err)
+		}
+		if !wantErr && err != nil {
+			t.Errorf("%s: unexpected error %v", url, err)
+		}
+	}
+}

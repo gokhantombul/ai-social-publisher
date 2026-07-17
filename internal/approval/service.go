@@ -260,6 +260,13 @@ func (s *Service) scoreJob(ctx context.Context, job post.Job, candidate news.Can
 		return err
 	}
 
+	return s.advanceScored(ctx, job.ID, candidate, acct, *score)
+}
+
+// advanceScored applies the notification gate to a SCORED job, moving it to
+// SKIPPED or WAITING_FIRST_APPROVAL. It is shared by the scoring worker and
+// stale-job recovery (for jobs stranded in SCORED by a crash).
+func (s *Service) advanceScored(ctx context.Context, jobID int64, candidate news.Candidate, acct account.Account, score ai.NewsScore) error {
 	notify := score.ShouldNotify &&
 		score.AccountFit == acct.Category &&
 		score.RiskLevel != "high" &&
@@ -267,15 +274,15 @@ func (s *Service) scoreJob(ctx context.Context, job post.Job, candidate news.Can
 
 	if !notify {
 		s.logger.Info("news not eligible for notification, skipping",
-			"job_id", job.ID, "importance", score.ImportanceScore, "threshold", acct.NotifyThreshold,
+			"job_id", jobID, "importance", score.ImportanceScore, "threshold", acct.NotifyThreshold,
 			"account_fit", score.AccountFit, "risk", score.RiskLevel, "should_notify", score.ShouldNotify)
-		return s.posts.UpdateStatus(ctx, job.ID, post.StatusSkipped)
+		return s.posts.UpdateStatus(ctx, jobID, post.StatusSkipped)
 	}
 
-	if err := s.posts.UpdateStatus(ctx, job.ID, post.StatusWaitingFirstApproval); err != nil {
+	if err := s.posts.UpdateStatus(ctx, jobID, post.StatusWaitingFirstApproval); err != nil {
 		return err
 	}
-	return s.queueFirstApproval(ctx, job.ID, candidate, acct, *score)
+	return s.queueFirstApproval(ctx, jobID, candidate, acct, score)
 }
 
 func (s *Service) queueFirstApproval(ctx context.Context, jobID int64, candidate news.Candidate, acct account.Account, score ai.NewsScore) error {
@@ -448,6 +455,11 @@ func (s *Service) SelectVariantForReview(ctx context.Context, jobID, variantID i
 	if job.SelectedVariantID.Valid && job.SelectedVariantID.Int64 == variantID &&
 		(job.Status == post.StatusApproved || job.Status == post.StatusPublishing || job.Status == post.StatusPublished) {
 		return nil
+	}
+	if job.Status == post.StatusScheduled {
+		// A stale Telegram button (or replayed callback) must not silently cancel
+		// an operator's schedule and publish immediately.
+		return fmt.Errorf("%w: job %d is scheduled; cancel the schedule before changing its variant", post.ErrInvalidTransition, jobID)
 	}
 	if job.Status == post.StatusReadyToPublish {
 		if !job.SelectedVariantID.Valid || job.SelectedVariantID.Int64 != variantID {
@@ -684,8 +696,19 @@ func (s *Service) PublishJob(ctx context.Context, jobID int64) error {
 	}
 
 	logEntry.Success = true
-	if err := s.posts.InsertPublishLog(ctx, logEntry); err != nil {
-		s.logger.Error("failed to persist publish success log", "job_id", jobID, "error", err)
+	// This row is the only evidence crash reconciliation has that the external
+	// publish succeeded; losing it can turn a successful publish into FAILED and
+	// invite a duplicate post, so failures are worth a couple of retries.
+	for attempt := 1; ; attempt++ {
+		err := s.posts.InsertPublishLog(ctx, logEntry)
+		if err == nil {
+			break
+		}
+		s.logger.Error("failed to persist publish success log", "job_id", jobID, "attempt", attempt, "error", err)
+		if attempt >= 3 || ctx.Err() != nil {
+			break
+		}
+		time.Sleep(200 * time.Millisecond)
 	}
 
 	if err := s.posts.MarkPublished(ctx, jobID, result.MediaID); err != nil {
@@ -802,12 +825,46 @@ func (s *Service) RecoverStaleJobs(ctx context.Context) error {
 	}
 	for _, job := range jobs {
 		switch job.Status {
+		case post.StatusNew:
+			// Created but never queued: the crash happened between GetOrCreate and
+			// the SCORING_QUEUED transition. Queue it now; candidate dedupe would
+			// otherwise leave it stuck forever.
+			if _, err := s.posts.ClaimStatus(ctx, job.ID, post.StatusNew, post.StatusScoringQueued); err != nil {
+				s.logger.Error("recover stalled new job failed", "job_id", job.ID, "error", err)
+			}
 		case post.StatusScoring, post.StatusGeneratingVariants:
 			if err := s.posts.ParkForAIRetry(ctx, job.ID, "recovered stale worker lease"); err != nil {
 				s.logger.Error("recover stale AI job failed", "job_id", job.ID, "error", err)
 			}
+		case post.StatusScored:
+			// Crash between ApplyScored and the follow-up gate decision: re-run the
+			// gate from the persisted score.
+			candidate, acct, err := s.loadCandidateAccount(ctx, job)
+			if err != nil {
+				s.logger.Error("recover stale scored job failed", "job_id", job.ID, "error", err)
+				continue
+			}
+			score, err := s.news.GetLatestScore(ctx, candidate.ID)
+			if err != nil {
+				s.logger.Error("recover stale scored job failed", "job_id", job.ID, "error", err)
+				continue
+			}
+			if err := s.advanceScored(ctx, job.ID, *candidate, *acct, ai.NewsScore{
+				ImportanceScore: score.ImportanceScore, ViralityScore: score.ViralityScore,
+				AccountFit: score.AccountFit, ShouldNotify: score.ShouldNotify,
+				RiskLevel: score.RiskLevel, Reason: score.Reason,
+			}); err != nil {
+				s.logger.Error("recover stale scored job failed", "job_id", job.ID, "error", err)
+			}
 		case post.StatusPublishing:
-			if mediaID, ok, err := s.posts.SuccessfulPublishMediaID(ctx, job.ID); err == nil && ok {
+			mediaID, published, err := s.posts.SuccessfulPublishMediaID(ctx, job.ID)
+			if err != nil {
+				// A transient lookup failure must not condemn a possibly successful
+				// publish to FAILED; leave the job for the next recovery pass.
+				s.logger.Error("reconcile stale publishing job failed, retrying next pass", "job_id", job.ID, "error", err)
+				continue
+			}
+			if published {
 				if err := s.posts.MarkPublished(ctx, job.ID, mediaID); err != nil {
 					s.logger.Error("reconcile successful publish failed", "job_id", job.ID, "error", err)
 				}
@@ -945,8 +1002,11 @@ func (s *Service) PurgeDeliveredNotifications(ctx context.Context) error {
 
 // DeliverNotifications sends leased outbox messages with exponential retry.
 func (s *Service) DeliverNotifications(ctx context.Context) error {
+	// The lease must outlast a full delivery attempt, or a second worker could
+	// claim and re-send a message that is still in flight.
+	lease := 2 * s.cfg.TelegramService.Timeout()
 	for i := 0; i < 20; i++ {
-		message, err := s.outbox.ClaimDue(ctx)
+		message, err := s.outbox.ClaimDue(ctx, lease)
 		if err != nil {
 			return err
 		}

@@ -54,11 +54,11 @@ func TestOutboxLeaseRetryAndDedupe(t *testing.T) {
 	if err := repo.Enqueue(ctx, key, n); err != nil {
 		t.Fatal(err)
 	}
-	message, err := repo.ClaimDue(ctx)
+	message, err := repo.ClaimDue(ctx, time.Minute)
 	if err != nil || message == nil || message.Notification.IdempotencyKey != key {
 		t.Fatalf("message=%+v err=%v", message, err)
 	}
-	second, err := repo.ClaimDue(ctx)
+	second, err := repo.ClaimDue(ctx, time.Minute)
 	if err != nil || second != nil {
 		t.Fatalf("leased message was claimed twice: %+v err=%v", second, err)
 	}
@@ -68,7 +68,7 @@ func TestOutboxLeaseRetryAndDedupe(t *testing.T) {
 	if _, err := db.ExecContext(ctx, `UPDATE notification_outbox SET next_attempt_at=now() WHERE id=$1`, message.ID); err != nil {
 		t.Fatal(err)
 	}
-	retry, err := repo.ClaimDue(ctx)
+	retry, err := repo.ClaimDue(ctx, time.Minute)
 	if err != nil || retry == nil || retry.Attempts != 2 {
 		t.Fatalf("retry=%+v err=%v", retry, err)
 	}
